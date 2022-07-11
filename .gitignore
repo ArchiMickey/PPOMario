@@ -1,0 +1,5 @@
+**/__pycache__/**
+lightning_logs
+wandb
+ppo_test
+train_video
