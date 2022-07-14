@@ -1,11 +1,13 @@
 import argparse
+from collections import deque
+import random
 from statistics import mode
 from typing import Any, List, Tuple
 import numpy as np
 
 import torch
 from pytorch_lightning import LightningModule, Trainer, seed_everything
-from torch import Tensor
+from torch import Tensor, device
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
 
@@ -19,8 +21,10 @@ from pl_bolts.utils import _GYM_AVAILABLE
 from pl_bolts.utils.warnings import warn_missing_pkg
 
 from env import make_mario
+from multienv import MultiEnv
 from icecream import ic
 from log import log_video
+from tqdm import tqdm
 
 if _GYM_AVAILABLE:
     import gym
@@ -37,17 +41,19 @@ class PPO(LightningModule):
     def __init__(
         self,
         # env: str,
-        world: int,
-        stage: int,
-        gamma: float = 0.99,
-        lam: float = 0.95,
+        world: int = 1,
+        stage: int = 1,
+        gamma: float = 0.9,
+        lam: float = 0.99,
         beta: float = 0.01,
         lr: float = 1e-4,
         max_episode_len: float = 200,
         hidden_size: int = 128,
-        batch_size: int = 512,
-        steps_per_epoch: int = 2048,
-        nb_optim_iters: int = 4,
+        batch_epoch: int = 10,
+        batch_size: int = 32,
+        num_workers: int = 1,
+        steps_per_epoch: int = 32,
+        nb_optim_iters: int = 1,
         clip_ratio: float = 0.2,
         render: bool = True,
         render_freq: int = 5000,
@@ -78,7 +84,9 @@ class PPO(LightningModule):
         self.steps_per_epoch = steps_per_epoch
         self.nb_optim_iters = nb_optim_iters
         self.hidden_size = hidden_size
+        self.batch_epoch = batch_epoch
         self.batch_size = batch_size
+        self.num_workers = num_workers
         self.gamma = gamma
         self.lam = lam
         self.beta = beta
@@ -89,19 +97,12 @@ class PPO(LightningModule):
         self.save_hyperparameters()
 
         # self.env = gym.make(env)
-        self.env = make_mario(world, stage)
+        self.demo_env = make_mario(world, stage)
+        self.env = MultiEnv(world, stage, num_workers)
         
-        self.net = ActorCriticCNN(self.env.observation_space.shape, self.hidden_size, self.env.action_space.n)
+        self.net = ActorCriticCNN(self.demo_env.observation_space.shape, self.hidden_size, self.demo_env.action_space.n)
 
-        self.batch_states = []
-        self.batch_actions = []
-        self.batch_adv = []
-        self.batch_qvals = []
-        self.batch_logp = []
-
-        self.ep_rewards = []
-        self.ep_values = []
-        self.epoch_rewards = []
+        self.epoch_rewards = deque(maxlen=100)
 
         self.total_episodes: int = 0
         self.total_steps: int = 0
@@ -110,7 +111,7 @@ class PPO(LightningModule):
         self.avg_ep_len = 0
         self.avg_reward = 0
 
-        self.state = torch.FloatTensor(self.env.reset())
+        self.state = torch.from_numpy(self.env.reset_all())
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """Passes in a state x through the network and returns the policy and a sampled action.
@@ -125,26 +126,26 @@ class PPO(LightningModule):
 
         return pi, action, value
 
-    def discount_rewards(self, rewards: List[float], discount: float) -> List[float]:
-        """Calculate the discounted rewards of all rewards in list.
-        Args:
-            rewards: list of rewards/advantages
-            discount: discount factor
-        Returns:
-            list of discounted rewards/advantages
-        """
-        assert isinstance(rewards[0], float)
+    # def discount_rewards(self, rewards: List[float], discount: float) -> List[float]:
+    #     """Calculate the discounted rewards of all rewards in list.
+    #     Args:
+    #         rewards: list of rewards/advantages
+    #         discount: discount factor
+    #     Returns:
+    #         list of discounted rewards/advantages
+    #     """
+        
+    #     cumul_reward = []
+    #     sum_r = 0.0
 
-        cumul_reward = []
-        sum_r = 0.0
+    #     for r in reversed(rewards):
+    #         sum_r = (sum_r * discount) + r
+    #         cumul_reward.append(sum_r)
 
-        for r in reversed(rewards):
-            sum_r = (sum_r * discount) + r
-            cumul_reward.append(sum_r)
+    #     return list(reversed(cumul_reward))
 
-        return list(reversed(cumul_reward))
-
-    def calc_advantage(self, rewards: List[float], values: List[float], last_value: float) -> List[float]:
+    
+    def calc_advantage(self, rewards: Tensor, dones: Tensor, values: Tensor, last_value: Tensor) -> List[float]:
         """Calculate the advantage given rewards, state values, and the last value of episode.
         Args:
             rewards: list of episode rewards
@@ -153,130 +154,151 @@ class PPO(LightningModule):
         Returns:
             list of advantages
         """
-        rews = rewards + [last_value]
-        vals = values + [last_value]
-        # GAE
-        delta = [rews[i] + self.gamma * vals[i + 1] - vals[i] for i in range(len(rews) - 1)]
-        adv = self.discount_rewards(delta, self.gamma * self.lam)
-
-        return adv
+        # discounted cumulative reward
+        gae = 0
+        rewards = rewards.to(self.device)
+        dones = dones.to(self.device)
+        R = []
+        for value, reward, done in list(zip(values, rewards, dones))[::-1]:
+            gae = gae * self.gamma * self.lam
+            gae = gae + reward + self.gamma * last_value.detach() * (1 - done) - value.detach()
+            last_value = value
+            R.append(gae + value)
+        R = R[::-1]
+        R = torch.cat(R).detach()
+        
+        # return advantages
+        advantages = R - values
+        return R, advantages
 
     def eval_1_episode(self):
-        print("Evaluating...", end='\r')
-        self.state = torch.FloatTensor(self.env.reset())
-        self.state = self.state.unsqueeze(0)
+        pbar = tqdm(desc="Evaluating", leave=False)
+        state = torch.FloatTensor(self.demo_env.reset()).unsqueeze(0)
         done = False
         episode_reward: float = 0
         frames = []
         durations = []
         while not done:
             with torch.no_grad():
-                _, action, _ = self(self.state)
+                _, action, _ = self(state.cuda())
                 action = action.squeeze(0).cpu().numpy().item()
+                pbar.update(1)
             if self.render:
-                frame = self.env.render(mode="rgb_array")
+                frame = self.demo_env.render(mode="rgb_array")
                 frame = np.array(frame)
                 frames.append(frame)
                 durations.append(1/24)
-            next_state, reward, done, _ = self.env.step(action)
+            next_state, reward, done, _ = self.demo_env.step(action)
             episode_reward += reward
-            self.state = torch.FloatTensor(next_state).unsqueeze(0)
+            state = torch.FloatTensor(next_state).unsqueeze(0)
         if self.render:
             log_video(env_name='{}-{}'.format(self.world, self.stage), frames=frames, durations=durations, curr_steps=self.global_step,
                       episode_reward=episode_reward, fps=24)
-        self.state = torch.FloatTensor(self.env.reset())
+        pbar.close()
+        return episode_reward
     
     def generate_trajectory_samples(self) -> Tuple[List[Tensor], List[Tensor], List[Tensor]]:
         """Contains the logic for generating trajectory data to train policy and value network.
         Yield:
            Tuple of Lists containing tensors for states, actions, log probs, qvals and advantage
         """
-
-        for step in range(self.steps_per_epoch):
-            self.state = self.state.unsqueeze(0).to(device=self.device)
+        states = []
+        actions = []
+        logp = []
+        dones = []
+        rewards = []
+        values = []
+        batch_qval = []
+        batch_adv = []
+        
+        
+        for _ in tqdm(range(self.steps_per_epoch), leave=False, desc="Sampling Batch",
+                      bar_format="{desc}: {percentage:3.0f}%|{bar:10}{r_bar}"):
+            self.state = self.state.to(device=self.device)
             # self.state.shape: torch.Size([1, 4, 84, 84])
 
             with torch.no_grad():
                 pi, action, value = self(self.state)
                 action = action.squeeze(0)
-                log_prob = pi.log_prob(action).sum(axis=-1)
-
-            # pi: Categorical(probs: torch.Size([1, 7]), logits: torch.Size([1, 7]))
-            # action: tensor([4])
-            # value: tensor([[0.0516]])
-            # log_prob: tensor(-1.9334)
-            next_state, reward, done, _ = self.env.step(action.cpu().numpy().item())
+                log_prob = pi.log_prob(action)
+            # pi: Categorical(probs: torch.Size([4, 7]), logits: torch.Size([4, 7]))
+            # action: tensor([5, 6, 4, 6])
+            # value: tensor([[-0.0681],
+            #             [ 0.0205],
+            #             [ 0.0011],
+            #             [ 0.0863]])
+            # log_prob: tensor([-2.1821, -1.8158, -1.8556, -1.8856])
+            next_state, reward, done, _ = self.env.step(action.cpu().numpy())
 
             self.episode_step += 1
             
-            if done:
-                self.total_episodes += 1
+            self.total_episodes += done.sum()
 
-            self.batch_states.append(self.state)
-            self.batch_actions.append(action)
-            self.batch_logp.append(log_prob)
-
-            self.ep_rewards.append(reward)
-            self.ep_values.append(value.item())
+            states.append(self.state)
+            actions.append(action)
+            logp.append(log_prob)
+            dones.append(done)
+            rewards.append(reward)
+            values.append(value)
 
             self.state = torch.FloatTensor(next_state)
 
-            epoch_end = step == (self.steps_per_epoch - 1)
-            terminal = len(self.ep_rewards) == self.max_episode_len
+        self.state = self.state.to(device=self.device) # self.state.shape: torch.Size([4, 4, 84, 84])
+        with torch.no_grad():
+            _, _, last_value = self(self.state)
+            last_value = last_value.squeeze() # last_value.shape: torch.Size([4])
+            steps_before_cutoff = self.episode_step
+        
+        batch_states = torch.cat(states)
+        batch_actions = torch.cat(actions)
+        batch_logp = torch.cat(logp)
+        ep_values = torch.cat(values).squeeze().detach()
+        ep_rewards = torch.FloatTensor(rewards)
+        ep_dones = torch.FloatTensor(dones)
+        
+        # self.batch_states.shape: torch.Size([B, 4, 84, 84])
+        # self.batch_actions.shape: torch.Size([B])
+        # self.batch_logp.shape: torch.Size([B])
+        # self.ep_values.shape: torch.Size([B])
+        # self.ep_dones.shape: torch.Size([B])
+        # rewards.shape: torch.Size([B, P])
+        # dones.shape: torch.Size([B, P])
+                        
+        # advantage
+        qval, adv = self.calc_advantage(ep_rewards, ep_dones, ep_values, last_value)
+        batch_qval += qval
+        batch_adv += adv
+        # logs
+        self.epoch_rewards.append(sum(ep_rewards) / self.num_workers)
+        # reset params 
+        self.episode_step = 0
+        self.state = torch.FloatTensor(self.env.reset_all())
 
-            if epoch_end or done or terminal:
-                # if trajectory ends abtruptly, boostrap value of next state
-                if (terminal or epoch_end) and not done:
-                    self.state = self.state.unsqueeze(0).to(device=self.device)
-                    with torch.no_grad():
-                        _, _, value = self(self.state)
-                        last_value = value.item()
-                        steps_before_cutoff = self.episode_step
-                else:
-                    last_value = 0
-                    steps_before_cutoff = 0
+        train_data = list(zip(
+            batch_states, batch_actions, batch_logp, batch_qval, batch_adv
+        ))
+        for _ in range(self.batch_epoch):
+            random.shuffle(train_data)
+            for data in train_data:
+                state, action, old_logp, qval, adv = data
+                yield state, action, old_logp, qval, adv
+            
+                
+                
 
-                # discounted cumulative reward
-                self.batch_qvals += self.discount_rewards(self.ep_rewards + [last_value], self.gamma)[:-1]
-                # advantage
-                self.batch_adv += self.calc_advantage(self.ep_rewards, self.ep_values, last_value)
-                # logs
-                self.epoch_rewards.append(sum(self.ep_rewards))
-                # reset params
-                self.ep_rewards = []
-                self.ep_values = []
-                self.episode_step = 0
-                self.state = torch.FloatTensor(self.env.reset())
+        # logging
+        self.avg_reward = sum(self.epoch_rewards) / self.steps_per_epoch
 
-            if epoch_end:
-                train_data = zip(
-                    self.batch_states, self.batch_actions, self.batch_logp, self.batch_qvals, self.batch_adv
-                )
+        # if epoch ended abruptly, exlude last cut-short episode to prevent stats skewness
+        epoch_rewards = self.epoch_rewards
 
-                for state, action, logp_old, qval, adv in train_data:
-                    yield state, action, logp_old, qval, adv
+        total_epoch_reward = sum(epoch_rewards)
+        nb_episodes = len(epoch_rewards)
 
-                self.batch_states.clear()
-                self.batch_actions.clear()
-                self.batch_adv.clear()
-                self.batch_logp.clear()
-                self.batch_qvals.clear()
+        self.avg_ep_reward = total_epoch_reward / nb_episodes
+        self.avg_ep_len = (self.steps_per_epoch - steps_before_cutoff) / nb_episodes
 
-                # logging
-                self.avg_reward = sum(self.epoch_rewards) / self.steps_per_epoch
-
-                # if epoch ended abruptly, exlude last cut-short episode to prevent stats skewness
-                epoch_rewards = self.epoch_rewards
-                if not done:
-                    epoch_rewards = epoch_rewards[:-1]
-
-                total_epoch_reward = sum(epoch_rewards)
-                nb_episodes = len(epoch_rewards)
-
-                self.avg_ep_reward = total_epoch_reward / nb_episodes
-                self.avg_ep_len = (self.steps_per_epoch - steps_before_cutoff) / nb_episodes
-
-                self.epoch_rewards.clear()
+        self.epoch_rewards.clear()
 
     def actor_loss(self, logits, action, logp_old, adv) -> Tensor:
         pi = Categorical(logits=logits)
@@ -286,8 +308,8 @@ class PPO(LightningModule):
         loss_actor = -(torch.min(ratio * adv, clip_adv)).mean()
         return loss_actor
 
-    def critic_loss(self, value, qval) -> Tensor:
-        loss_critic = (qval - value).pow(2).mean()
+    def critic_loss(self, qval, value) -> Tensor:
+        loss_critic = F.smooth_l1_loss(qval, value.squeeze())
         return loss_critic
 
     def training_step(self, batch: Tuple[Tensor, Tensor], batch_idx):
@@ -300,41 +322,34 @@ class PPO(LightningModule):
             loss
         """
         state, action, old_logp, qval, adv = batch
-        # state.shape: torch.Size([B, 1, 4, 84, 84])
+        # state.shape: torch.Size([B, 4, 84, 84])
         # action.shape: torch.Size([B])
         # old_logp.shape: torch.Size([B])
         # qval.shape: torch.Size([B])
         # adv.shape: torch.Size([B])
         # normalize advantages
-        adv = (adv - adv.mean()) / adv.std()
+        logits, value = self.net(state)
+        actor_loss = self.actor_loss(logits, action, old_logp, adv)
+        critic_loss = self.critic_loss(qval, value)
+        entropy_loss = torch.mean(Categorical(logits=logits).entropy())
+        total_loss = actor_loss + critic_loss - self.beta * entropy_loss
+        
 
         self.log("episodes", self.total_episodes, on_step=False, on_epoch=True, prog_bar=True)
         self.log("avg_ep_len", self.avg_ep_len, on_step=False, on_epoch=True)
         self.log("avg_ep_reward", self.avg_ep_reward, prog_bar=True, on_step=False, on_epoch=True)
         self.log("avg_reward", self.avg_reward, on_step=False, on_epoch=True)
-
-        logits, value = self.net(state.squeeze(1))
-        # logits.shape: torch.Size([B, 7])
-        # value.shape: torch.Size([B, 1])
-        new_policy = F.softmax(logits, dim=1)
-        new_m = Categorical(probs=new_policy)
-        entropy_loss = torch.mean(new_m.entropy())
         
-        actor_loss = self.actor_loss(logits, action, old_logp, adv)
-        self.log("actor_loss", actor_loss, prog_bar=True, logger=True)
-
-        critic_loss = self.critic_loss(value, qval)
-        self.log("critic_loss", critic_loss, logger=True)
+        self.log("actor_loss", actor_loss, on_step=True, logger=True)
+        self.log("critic_loss", critic_loss, on_step=True, logger=True)
+        self.log("total_loss", total_loss, on_step=True, logger=True)
         
-        loss = actor_loss + critic_loss - self.beta * entropy_loss
-        self.log("total_loss", loss)
-        
-        return loss
+        return total_loss
 
     def on_train_batch_end(self, outputs, batch: Any, batch_idx: int, unused: int = 0) -> None:
         if self.global_step % self.render_freq == 0:
             test_score = self.eval_1_episode()
-            self.log("test_score", test_score, on_epoch=True, prog_bar=True)
+            self.log("test_score", test_score, on_step=True, prog_bar=True)
 
     def configure_gradient_clipping(
         self, optimizer, optimizer_idx, gradient_clip_val, gradient_clip_algorithm
@@ -375,11 +390,11 @@ class PPO(LightningModule):
         parser.add_argument("--lr_actor", type=float, default=3e-4, help="learning rate of actor network")
         parser.add_argument("--lr_critic", type=float, default=1e-3, help="learning rate of critic network")
         parser.add_argument("--max_episode_len", type=int, default=1000, help="capacity of the replay buffer")
-        parser.add_argument("--batch_size", type=int, default=512, help="batch_size when training network")
+        parser.add_argument("--batch_size", type=int, default=4, help="batch_size when training network")
         parser.add_argument(
             "--steps_per_epoch",
             type=int,
-            default=2048,
+            default=32,
             help="how many action-state pairs to rollout for trajectory collection per epoch",
         )
         parser.add_argument(
@@ -399,7 +414,7 @@ def cli_main() -> None:
     parser = PPO.add_model_specific_args(parent_parser)
     args = parser.parse_args()
 
-    model = PPO(1, 1, **vars(args))
+    model = PPO(world=1, stage=1, num_workers=6, )
 
     seed_everything(0)
     trainer = Trainer.from_argparse_args(args)
