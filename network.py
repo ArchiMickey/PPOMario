@@ -1,4 +1,3 @@
-from turtle import forward
 from typing import Tuple
 import numpy as np
 from torch import Tensor, nn
@@ -20,6 +19,7 @@ class ActorCriticCNN(nn.Module):
             nn.ReLU(),
             nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
+            nn.Flatten(),
         )
         
         conv_out = self._get_conv_out(state_dim)
