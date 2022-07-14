@@ -1,8 +1,7 @@
 from typing import List
 import numpy as np
 import ray
-from wandb import agent
-from env import make_mario
+from .env import make_mario
 
 from icecream import ic
 

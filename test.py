@@ -30,7 +30,7 @@ model = PPO(
 )
 
 now_dt = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-wandb_logger = WandbLogger(name=f"PPOMario-{now_dt}")
+wandb_logger = WandbLogger(name=f"PPOMario-{now_dt}", offline=True)
 
 trainer = pl.Trainer(
     accelerator="gpu",
@@ -45,4 +45,4 @@ trainer = pl.Trainer(
 )
 
 # trainer.tune(model)
-trainer.fit(model)
+trainer.test(model, ckpt_path='model/ppomario-test_score=311.60-step=223000.ckpt')

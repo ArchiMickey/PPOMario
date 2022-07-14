@@ -13,17 +13,17 @@ from torch.utils.data import DataLoader
 
 from pl_bolts.datamodules import ExperienceSourceDataset
 # TODO: implement CNN for actor and critic model
-from network import ActorCriticCNN
 from torch.distributions import Categorical
 # from pl_bolts.models.rl.common.networks import MLP, ActorCategorical, ActorContinous
 import torch.nn.functional as F
 from pl_bolts.utils import _GYM_AVAILABLE
 from pl_bolts.utils.warnings import warn_missing_pkg
 
-from env import make_mario
-from multienv import MultiEnv
+from .network import ActorCriticCNN
+from .env import make_mario
+from .multienv import MultiEnv
 from icecream import ic
-from log import log_video
+from .log import log_video
 from tqdm import tqdm
 
 if _GYM_AVAILABLE:
@@ -351,6 +351,9 @@ class PPO(LightningModule):
             test_score = self.eval_1_episode()
             self.log("test_score", test_score, on_step=True, prog_bar=True)
 
+    def test_step(self, *args, **kwargs):
+        return self.eval_1_episode()
+    
     def configure_gradient_clipping(
         self, optimizer, optimizer_idx, gradient_clip_val, gradient_clip_algorithm
     ):
@@ -380,6 +383,9 @@ class PPO(LightningModule):
     def train_dataloader(self) -> DataLoader:
         """Get train loader."""
         return self._dataloader()
+    
+    def test_dataloader(self) -> DataLoader:
+        return DataLoader([0])
 
     @staticmethod
     def add_model_specific_args(parent_parser):  # pragma: no cover

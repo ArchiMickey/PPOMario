@@ -4,7 +4,7 @@ import numpy as np
 import ray
 from torch import nn
 from wandb import agent
-from env import make_mario
+from .env import make_mario
 
 from icecream import ic
 
