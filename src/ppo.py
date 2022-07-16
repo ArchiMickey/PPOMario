@@ -111,6 +111,11 @@ class PPO(LightningModule):
         self.step_rewards = deque(maxlen=100)
         self.end_rewards = deque(maxlen=100)
         self.end_steps = deque(maxlen=100)
+        for _ in range(100):
+            self.step_rewards.append(0)
+            self.end_rewards.append(0)
+            self.end_steps.append(0)
+            
         self.ep_rewards = [0 for _ in range(self.num_workers)]
         self.ep_steps = [0 for _ in range(self.num_workers)]
 
