@@ -107,9 +107,12 @@ class PPO(LightningModule):
         self.total_episodes: int = 0
         self.total_steps: int = 0
         self.episode_step = 0
-        self.avg_ep_reward = 0
-        self.avg_ep_len = 0
-        self.avg_reward = 0
+        
+        self.step_rewards = deque(maxlen=100)
+        self.end_rewards = deque(maxlen=100)
+        self.end_steps = deque(maxlen=100)
+        self.ep_rewards = [0 for _ in range(self.num_workers)]
+        self.ep_steps = [0 for _ in range(self.num_workers)]
 
         self.state = torch.from_numpy(self.env.reset_all())
 
@@ -230,9 +233,20 @@ class PPO(LightningModule):
             # log_prob: tensor([-2.1821, -1.8158, -1.8556, -1.8856])
             next_state, reward, done, _ = self.env.step(action.cpu().numpy())
 
-            self.episode_step += 1
+            for i in range(self.num_workers):
+                self.ep_steps[i] += 1
+                self.step_rewards.append(reward[i])
+                self.ep_rewards[i] += reward[i]
             
-            self.total_episodes += done.sum()
+            self.episode_step += 1
+            self.total_steps += self.num_workers
+            for idx, worker_done in enumerate(done):
+                if worker_done:
+                    self.total_episodes += 1
+                    self.end_steps.append(self.ep_steps[idx])
+                    self.end_rewards.append(self.ep_rewards[idx])
+                    self.ep_rewards[idx] = 0
+                    self.ep_steps[idx] = 0
 
             states.append(self.state)
             actions.append(action)
@@ -247,7 +261,6 @@ class PPO(LightningModule):
         with torch.no_grad():
             _, _, last_value = self(self.state)
             last_value = last_value.squeeze() # last_value.shape: torch.Size([4])
-            steps_before_cutoff = self.episode_step
         
         batch_states = torch.cat(states)
         batch_actions = torch.cat(actions)
@@ -282,23 +295,6 @@ class PPO(LightningModule):
             for data in train_data:
                 state, action, old_logp, qval, adv = data
                 yield state, action, old_logp, qval, adv
-            
-                
-                
-
-        # logging
-        self.avg_reward = sum(self.epoch_rewards) / self.steps_per_epoch
-
-        # if epoch ended abruptly, exlude last cut-short episode to prevent stats skewness
-        epoch_rewards = self.epoch_rewards
-
-        total_epoch_reward = sum(epoch_rewards)
-        nb_episodes = len(epoch_rewards)
-
-        self.avg_ep_reward = total_epoch_reward / nb_episodes
-        self.avg_ep_len = (self.steps_per_epoch - steps_before_cutoff) / nb_episodes
-
-        self.epoch_rewards.clear()
 
     def actor_loss(self, logits, action, logp_old, adv) -> Tensor:
         pi = Categorical(logits=logits)
@@ -334,22 +330,23 @@ class PPO(LightningModule):
         entropy_loss = torch.mean(Categorical(logits=logits).entropy())
         total_loss = actor_loss + critic_loss - self.beta * entropy_loss
         
-
-        self.log("episodes", self.total_episodes, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("avg_ep_len", self.avg_ep_len, on_step=False, on_epoch=True)
-        self.log("avg_ep_reward", self.avg_ep_reward, prog_bar=True, on_step=False, on_epoch=True)
-        self.log("avg_reward", self.avg_reward, on_step=False, on_epoch=True)
-        
         self.log("actor_loss", actor_loss, on_step=True, logger=True)
         self.log("critic_loss", critic_loss, on_step=True, logger=True)
         self.log("total_loss", total_loss, on_step=True, logger=True)
         
         return total_loss
-
+    
     def on_train_batch_end(self, outputs, batch: Any, batch_idx: int, unused: int = 0) -> None:
         if self.global_step % self.render_freq == 0:
             test_score = self.eval_1_episode()
             self.log("test_score", test_score, on_step=True, prog_bar=True)
+            
+    def on_train_epoch_end(self):
+        self.log("episodes", self.total_episodes, on_epoch=True, prog_bar=True)
+        self.log("avg_ep_len", sum(self.end_steps) / len(self.end_steps), on_epoch=True)
+        self.log("avg_ep_reward", sum(self.end_rewards) / len(self.end_rewards), prog_bar=True, on_epoch=True)
+        self.log("avg_reward", sum(self.step_rewards) / len(self.step_rewards), on_epoch=True)
+        return
 
     def test_step(self, *args, **kwargs):
         return self.eval_1_episode()
