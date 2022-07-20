@@ -27,6 +27,11 @@ class CustomReward(Wrapper):
         self.current_x = info['x_pos']
         return next_state, reward / 10., done, info
 
+    def reset(self):
+        self.curr_score = 0
+        self.current_x = 0
+        return super().reset()
+
 def make_mario(world: int = 1, stage: int = 1, action_space: str = 'simple'):
     if action_space == 'right':
         actions = RIGHT_ONLY
@@ -35,13 +40,13 @@ def make_mario(world: int = 1, stage: int = 1, action_space: str = 'simple'):
     else:
         actions = SIMPLE_MOVEMENT
     env = gym_super_mario_bros.make('SuperMarioBros-{}-{}-v0'.format(world, stage))
-    env = CustomReward(env)
     env = JoypadSpace(env, actions=actions)
     env = ResizeObservation(env, 84)
     env = GrayScaleObservation(env, keep_dim=False)
     env = TransformObservation(env, lambda x: x.astype(np.float32) / 255.)
     env = FrameStack(env, num_stack=4)
     env = MaxAndSkipEnv(env, skip=4)
+    env = CustomReward(env)
     
     return env
 
