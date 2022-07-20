@@ -133,25 +133,6 @@ class PPO(LightningModule):
         action = pi.sample()
 
         return pi, action, value
-
-    # def discount_rewards(self, rewards: List[float], discount: float) -> List[float]:
-    #     """Calculate the discounted rewards of all rewards in list.
-    #     Args:
-    #         rewards: list of rewards/advantages
-    #         discount: discount factor
-    #     Returns:
-    #         list of discounted rewards/advantages
-    #     """
-        
-    #     cumul_reward = []
-    #     sum_r = 0.0
-
-    #     for r in reversed(rewards):
-    #         sum_r = (sum_r * discount) + r
-    #         cumul_reward.append(sum_r)
-
-    #     return list(reversed(cumul_reward))
-
     
     def calc_advantage(self, rewards: Tensor, dones: Tensor, values: Tensor, last_value: Tensor) -> List[float]:
         """Calculate the advantage given rewards, state values, and the last value of episode.
@@ -229,7 +210,8 @@ class PPO(LightningModule):
                 pi, action, value = self(self.state)
                 action = action.squeeze(0)
                 log_prob = pi.log_prob(action)
-            # pi: Categorical(probs: torch.Size([4, 7]), logits: torch.Size([4, 7]))
+            
+            # pi: Categorical(probs: torch.Size([4, 7]), logits: torch.Size([P, A]))
             # action: tensor([5, 6, 4, 6])
             # value: tensor([[-0.0681],
             #             [ 0.0205],
@@ -262,10 +244,10 @@ class PPO(LightningModule):
 
             self.state = torch.FloatTensor(next_state)
 
-        self.state = self.state.to(device=self.device) # self.state.shape: torch.Size([4, 4, 84, 84])
+        self.state = self.state.to(device=self.device) # self.state.shape: torch.Size([P, 4, 84, 84])
         with torch.no_grad():
             _, _, last_value = self(self.state)
-            last_value = last_value.squeeze() # last_value.shape: torch.Size([4])
+            last_value = last_value.squeeze() # last_value.shape: torch.Size([P])
         
         batch_states = torch.cat(states)
         batch_actions = torch.cat(actions)
@@ -313,6 +295,13 @@ class PPO(LightningModule):
         loss_critic = F.smooth_l1_loss(qval, value.squeeze())
         return loss_critic
 
+    def on_train_epoch_start(self):
+        self.log("episodes", self.total_episodes, on_epoch=True, prog_bar=True)
+        self.log("avg_ep_len", sum(self.end_steps) / len(self.end_steps), on_epoch=True)
+        self.log("avg_ep_reward", sum(self.end_rewards) / len(self.end_rewards), prog_bar=True, on_epoch=True)
+        self.log("avg_reward", sum(self.step_rewards) / len(self.step_rewards), on_epoch=True)
+        return
+    
     def training_step(self, batch: Tuple[Tensor, Tensor], batch_idx):
         """Carries out a single update to actor and critic network from a batch of replay buffer.
         Args:
@@ -328,13 +317,12 @@ class PPO(LightningModule):
         # old_logp.shape: torch.Size([B])
         # qval.shape: torch.Size([B])
         # adv.shape: torch.Size([B])
-        # normalize advantages
+        
         logits, value = self.net(state)
         actor_loss = self.actor_loss(logits, action, old_logp, adv)
         critic_loss = self.critic_loss(qval, value)
         entropy_loss = torch.mean(Categorical(logits=logits).entropy())
         total_loss = actor_loss + critic_loss - self.beta * entropy_loss
-        
         self.log("actor_loss", actor_loss, on_step=True, logger=True)
         self.log("critic_loss", critic_loss, on_step=True, logger=True)
         self.log("total_loss", total_loss, on_step=True, logger=True)
@@ -344,14 +332,7 @@ class PPO(LightningModule):
     def on_train_batch_end(self, outputs, batch: Any, batch_idx: int, unused: int = 0) -> None:
         if self.global_step % self.render_freq == 0:
             test_score = self.eval_1_episode()
-            self.log("test_score", test_score, on_step=True, prog_bar=True)
-            
-    def on_train_epoch_end(self):
-        self.log("episodes", self.total_episodes, on_epoch=True, prog_bar=True)
-        self.log("avg_ep_len", sum(self.end_steps) / len(self.end_steps), on_epoch=True)
-        self.log("avg_ep_reward", sum(self.end_rewards) / len(self.end_rewards), prog_bar=True, on_epoch=True)
-        self.log("avg_reward", sum(self.step_rewards) / len(self.step_rewards), on_epoch=True)
-        return
+            self.log("test_score", test_score, on_step=True, prog_bar=True)        
 
     def test_step(self, *args, **kwargs):
         return self.eval_1_episode()
@@ -367,8 +348,9 @@ class PPO(LightningModule):
     def configure_optimizers(self) -> List[Optimizer]:
         """Initialize Adam optimizer."""
         optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr)
-
-        return optimizer
+        lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=0.01, total_iters=350)
+        
+        return [optimizer], [lr_scheduler]
 
     def optimizer_step(self, *args, **kwargs):
         """Run ``nb_optim_iters`` number of iterations of gradient descent on actor and critic for each data
@@ -389,43 +371,11 @@ class PPO(LightningModule):
     def test_dataloader(self) -> DataLoader:
         return DataLoader([0])
 
-    @staticmethod
-    def add_model_specific_args(parent_parser):  # pragma: no cover
-        parser = argparse.ArgumentParser(parents=[parent_parser])
-        parser.add_argument("--env", type=str, default="CartPole-v0")
-        parser.add_argument("--gamma", type=float, default=0.99, help="discount factor")
-        parser.add_argument("--lam", type=float, default=0.95, help="advantage discount factor")
-        parser.add_argument("--lr_actor", type=float, default=3e-4, help="learning rate of actor network")
-        parser.add_argument("--lr_critic", type=float, default=1e-3, help="learning rate of critic network")
-        parser.add_argument("--max_episode_len", type=int, default=1000, help="capacity of the replay buffer")
-        parser.add_argument("--batch_size", type=int, default=4, help="batch_size when training network")
-        parser.add_argument(
-            "--steps_per_epoch",
-            type=int,
-            default=32,
-            help="how many action-state pairs to rollout for trajectory collection per epoch",
-        )
-        parser.add_argument(
-            "--nb_optim_iters", type=int, default=4, help="how many steps of gradient descent to perform on each batch"
-        )
-        parser.add_argument(
-            "--clip_ratio", type=float, default=0.2, help="hyperparameter for clipping in the policy objective"
-        )
-
-        return parser
-
 
 def cli_main() -> None:
-    parent_parser = argparse.ArgumentParser(add_help=False)
-    parent_parser = Trainer.add_argparse_args(parent_parser)
-
-    parser = PPO.add_model_specific_args(parent_parser)
-    args = parser.parse_args()
-
     model = PPO(world=1, stage=1, num_workers=6, )
 
-    seed_everything(0)
-    trainer = Trainer.from_argparse_args(args)
+    trainer = Trainer()
     trainer.fit(model)
 
 
