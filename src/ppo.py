@@ -347,7 +347,7 @@ class PPO(LightningModule):
     
     def configure_optimizers(self) -> List[Optimizer]:
         """Initialize Adam optimizer."""
-        optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr, capturable=True)
         lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=0.01, total_iters=350)
         
         return [optimizer], [lr_scheduler]
