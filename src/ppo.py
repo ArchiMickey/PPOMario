@@ -118,6 +118,7 @@ class PPO(LightningModule):
             
         self.ep_rewards = [0 for _ in range(self.num_workers)]
         self.ep_steps = [0 for _ in range(self.num_workers)]
+        self.ep_best_reward = 0
 
         self.state = torch.from_numpy(self.env.reset_all())
 
@@ -200,6 +201,8 @@ class PPO(LightningModule):
         batch_qval = []
         batch_adv = []
         
+        self.ep_best_reward = 0
+        
         
         for _ in tqdm(range(self.steps_per_epoch), leave=False, desc="Sampling Batch",
                       bar_format="{desc}: {percentage:3.0f}%|{bar:10}{r_bar}"):
@@ -232,6 +235,8 @@ class PPO(LightningModule):
                     self.total_episodes += 1
                     self.end_steps.append(self.ep_steps[idx])
                     self.end_rewards.append(self.ep_rewards[idx])
+                    if self.ep_rewards[idx] > self.ep_best_reward:
+                        self.ep_best_reward = self.ep_rewards[idx]
                     self.ep_rewards[idx] = 0
                     self.ep_steps[idx] = 0
 
@@ -300,6 +305,7 @@ class PPO(LightningModule):
         self.log("avg_ep_len", sum(self.end_steps) / len(self.end_steps), on_epoch=True)
         self.log("avg_ep_reward", sum(self.end_rewards) / len(self.end_rewards), prog_bar=True, on_epoch=True)
         self.log("avg_reward", sum(self.step_rewards) / len(self.step_rewards), on_epoch=True)
+        self.log("best_ep_reward", self.ep_best_reward, on_epoch=True, prog_bar=True)
         return
     
     def training_step(self, batch: Tuple[Tensor, Tensor], batch_idx):
