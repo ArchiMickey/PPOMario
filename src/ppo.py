@@ -161,7 +161,7 @@ class PPO(LightningModule):
         advantages = R - values
         return R, advantages
 
-    def eval_1_episode(self):
+    def eval_1_episode(self, is_test: bool = False):
         pbar = tqdm(desc="Evaluating", leave=False)
         state = torch.FloatTensor(self.demo_env.reset()).unsqueeze(0)
         done = False
@@ -183,7 +183,7 @@ class PPO(LightningModule):
             state = torch.FloatTensor(next_state).unsqueeze(0)
         if self.render:
             log_video(env_name='{}-{}'.format(self.world, self.stage), frames=frames, durations=durations, curr_steps=self.global_step,
-                      episode_reward=episode_reward, fps=24)
+                      episode_reward=episode_reward, fps=24, is_test=is_test)
         pbar.close()
         return episode_reward
     
@@ -341,7 +341,7 @@ class PPO(LightningModule):
             self.log("test_score", test_score, on_step=True, prog_bar=True)        
 
     def test_step(self, *args, **kwargs):
-        return self.eval_1_episode()
+        return self.eval_1_episode(is_test=True)
     
     def configure_gradient_clipping(
         self, optimizer, optimizer_idx, gradient_clip_val, gradient_clip_algorithm
