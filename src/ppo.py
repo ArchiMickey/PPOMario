@@ -12,9 +12,7 @@ from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
 
 from pl_bolts.datamodules import ExperienceSourceDataset
-# TODO: implement CNN for actor and critic model
 from torch.distributions import Categorical
-# from pl_bolts.models.rl.common.networks import MLP, ActorCategorical, ActorContinous
 import torch.nn.functional as F
 from pl_bolts.utils import _GYM_AVAILABLE
 from pl_bolts.utils.warnings import warn_missing_pkg
@@ -25,6 +23,7 @@ from .multienv import MultiEnv
 from icecream import ic
 from .log import log_video
 from tqdm import tqdm
+from loguru import logger
 
 if _GYM_AVAILABLE:
     import gym
@@ -47,16 +46,19 @@ class PPO(LightningModule):
         lam: float = 0.99,
         beta: float = 0.01,
         lr: float = 1e-4,
+        lr_decay_ratio: float = 0.1,
+        lr_decay_epoch: int = 350,
         max_episode_len: float = 200,
         hidden_size: int = 128,
         batch_epoch: int = 10,
         batch_size: int = 32,
         num_workers: int = 1,
         steps_per_epoch: int = 32,
+        val_episodes: int = 5,
+        val_interval: int = 5000,
         nb_optim_iters: int = 1,
         clip_ratio: float = 0.2,
         render: bool = True,
-        render_freq: int = 5000,
         **kwargs: Any,
     ) -> None:
         """
@@ -81,7 +83,11 @@ class PPO(LightningModule):
         self.world = world
         self.stage = stage
         self.lr = lr
+        self.lr_decay_ratio = lr_decay_ratio
+        self.lr_decay_epoch = lr_decay_epoch
         self.steps_per_epoch = steps_per_epoch
+        self.val_episodes = val_episodes
+        self.val_interval = val_interval
         self.nb_optim_iters = nb_optim_iters
         self.hidden_size = hidden_size
         self.batch_epoch = batch_epoch
@@ -93,7 +99,6 @@ class PPO(LightningModule):
         self.max_episode_len = max_episode_len
         self.clip_ratio = clip_ratio
         self.render = render
-        self.render_freq = render_freq
         self.save_hyperparameters()
 
         # self.env = gym.make(env)
@@ -118,7 +123,6 @@ class PPO(LightningModule):
             
         self.ep_rewards = [0 for _ in range(self.num_workers)]
         self.ep_steps = [0 for _ in range(self.num_workers)]
-        self.ep_best_reward = 0
 
         self.state = torch.from_numpy(self.env.reset_all())
 
@@ -207,20 +211,12 @@ class PPO(LightningModule):
         for _ in tqdm(range(self.steps_per_epoch), leave=False, desc="Sampling Batch",
                       bar_format="{desc}: {percentage:3.0f}%|{bar:10}{r_bar}"):
             self.state = self.state.to(device=self.device)
-            # self.state.shape: torch.Size([1, 4, 84, 84])
 
             with torch.no_grad():
                 pi, action, value = self(self.state)
                 action = action.squeeze(0)
                 log_prob = pi.log_prob(action)
             
-            # pi: Categorical(probs: torch.Size([4, 7]), logits: torch.Size([P, A]))
-            # action: tensor([5, 6, 4, 6])
-            # value: tensor([[-0.0681],
-            #             [ 0.0205],
-            #             [ 0.0011],
-            #             [ 0.0863]])
-            # log_prob: tensor([-2.1821, -1.8158, -1.8556, -1.8856])
             next_state, reward, done, _ = self.env.step(action.cpu().numpy())
 
             for i in range(self.num_workers):
@@ -235,8 +231,6 @@ class PPO(LightningModule):
                     self.total_episodes += 1
                     self.end_steps.append(self.ep_steps[idx])
                     self.end_rewards.append(self.ep_rewards[idx])
-                    if self.ep_rewards[idx] > self.ep_best_reward:
-                        self.ep_best_reward = self.ep_rewards[idx]
                     self.ep_rewards[idx] = 0
                     self.ep_steps[idx] = 0
 
@@ -260,15 +254,7 @@ class PPO(LightningModule):
         ep_values = torch.cat(values).squeeze().detach()
         ep_rewards = torch.FloatTensor(rewards)
         ep_dones = torch.FloatTensor(dones)
-        
-        # self.batch_states.shape: torch.Size([B, 4, 84, 84])
-        # self.batch_actions.shape: torch.Size([B])
-        # self.batch_logp.shape: torch.Size([B])
-        # self.ep_values.shape: torch.Size([B])
-        # self.ep_dones.shape: torch.Size([B])
-        # rewards.shape: torch.Size([B, P])
-        # dones.shape: torch.Size([B, P])
-                        
+          
         # advantage
         qval, adv = self.calc_advantage(ep_rewards, ep_dones, ep_values, last_value)
         batch_qval += qval
@@ -305,7 +291,7 @@ class PPO(LightningModule):
         self.log("avg_ep_len", sum(self.end_steps) / len(self.end_steps), on_epoch=True)
         self.log("avg_ep_reward", sum(self.end_rewards) / len(self.end_rewards), prog_bar=True, on_epoch=True)
         self.log("avg_reward", sum(self.step_rewards) / len(self.step_rewards), on_epoch=True)
-        self.log("best_ep_reward", self.ep_best_reward, on_epoch=True, prog_bar=True)
+        # self.log("best_ep_reward", self.ep_best_reward, on_epoch=True, prog_bar=True)
         return
     
     def training_step(self, batch: Tuple[Tensor, Tensor], batch_idx):
@@ -318,11 +304,6 @@ class PPO(LightningModule):
             loss
         """
         state, action, old_logp, qval, adv = batch
-        # state.shape: torch.Size([B, 4, 84, 84])
-        # action.shape: torch.Size([B])
-        # old_logp.shape: torch.Size([B])
-        # qval.shape: torch.Size([B])
-        # adv.shape: torch.Size([B])
         
         logits, value = self.net(state)
         actor_loss = self.actor_loss(logits, action, old_logp, adv)
@@ -331,15 +312,33 @@ class PPO(LightningModule):
         total_loss = actor_loss + critic_loss - self.beta * entropy_loss
         self.log("actor_loss", actor_loss, on_step=True, logger=True)
         self.log("critic_loss", critic_loss, on_step=True, logger=True)
+        self.log("entropy_loss", entropy_loss, on_step=True, logger=True)
         self.log("total_loss", total_loss, on_step=True, logger=True)
         
         return total_loss
     
     def on_train_batch_end(self, outputs, batch: Any, batch_idx: int, unused: int = 0) -> None:
-        if self.global_step % self.render_freq == 0:
-            test_score = self.eval_1_episode()
-            self.log("test_score", test_score, on_step=True, prog_bar=True)        
-
+        
+        if self.global_step % self.val_interval == 0:
+            avg_score = self._validation()
+            print('')
+            print(f"Average score: {avg_score:.2f} at step {self.global_step}")
+            self.log("avg_score", avg_score, logger=True, prog_bar=True)
+            
+        return None
+    
+    
+    def _validation(self, *args, **kwargs):
+        val_scores = []
+        for _ in tqdm(range(self.val_episodes), desc="Validating in episode", leave=False,
+                      bar_format="{desc}: {percentage:3.0f}%|{bar:10}{r_bar}"):
+            val_scores.append(self.eval_1_episode())
+            
+        avg_score = sum(val_scores) / len(val_scores)
+        
+        
+        return avg_score
+    
     def test_step(self, *args, **kwargs):
         return self.eval_1_episode(is_test=True)
     
@@ -354,7 +353,7 @@ class PPO(LightningModule):
     def configure_optimizers(self) -> List[Optimizer]:
         """Initialize Adam optimizer."""
         optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr, capturable=True)
-        lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=0.01, total_iters=350)
+        lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=self.lr_decay_ratio, total_iters=self.lr_decay_epoch)
         
         return [optimizer], [lr_scheduler]
 
@@ -370,12 +369,20 @@ class PPO(LightningModule):
         dataloader = DataLoader(dataset=dataset, batch_size=self.batch_size)
         return dataloader
 
+    def _dummy_dataloader(self) -> DataLoader:
+        """Dummy dataloader for validation/ testing
+        """
+        return DataLoader([0])
+
     def train_dataloader(self) -> DataLoader:
         """Get train loader."""
         return self._dataloader()
     
+    def val_dataloader(self) -> DataLoader:
+        return self._dummy_dataloader()
+    
     def test_dataloader(self) -> DataLoader:
-        return DataLoader([0])
+        return self._dummy_dataloader()
 
 
 def cli_main() -> None:
