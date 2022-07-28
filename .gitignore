@@ -4,3 +4,4 @@ wandb
 ppo_test
 train_video
 model
+test_video
