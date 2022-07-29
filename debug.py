@@ -25,15 +25,15 @@ def main(world: int = 1, stage: int = 1, ckpt_path: str = None):
         lr_decay_epoch=15000,
         nb_optim_iters=1,
         batch_epoch=10,
-        batch_size=64,
+        batch_size=16,
         num_workers=6,
         hidden_size=512,
-        steps_per_epoch=1024,
+        steps_per_epoch=128,
         val_episodes=5,
         val_interval=10000,
     )
 
-    wandb_logger = WandbLogger(name=f"PPOMario-{world}-{stage}")
+    wandb_logger = WandbLogger(name=f"PPOMario-{world}-{stage}", offline=True)
 
     trainer = pl.Trainer(
         accelerator="gpu",
@@ -53,4 +53,4 @@ def main(world: int = 1, stage: int = 1, ckpt_path: str = None):
         trainer.fit(model)
 
 if __name__ == "__main__":
-    main(world=2, stage=2)
+    main(world=1, stage=1)

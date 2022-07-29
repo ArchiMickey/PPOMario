@@ -1,7 +1,7 @@
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
-from src.ppo import PPO
+from src.ppomario import PPO
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 
 
