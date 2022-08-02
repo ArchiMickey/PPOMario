@@ -1,7 +1,7 @@
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
-from src.ppomario import PPO
+from src.ppomario import PPOMario
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 
 
@@ -17,17 +17,17 @@ checkpoint_callback = ModelCheckpoint(
 
 def main(world: int = 1, stage: int = 1, ckpt_path: str = None):
     if ckpt_path is not None:
-        model = PPO.load_from_checkpoint(ckpt_path)
+        model = PPOMario.load_from_checkpoint(ckpt_path)
     
     else:
-        model = PPO(
+        model = PPOMario(
             world=world,
             stage=stage,
             lr=1e-3,
             nb_optim_iters=1,
             batch_epoch=10,
             batch_size=64,
-            num_workers=6,
+            num_workers=1,
             hidden_size=512,
             steps_per_epoch=1024,
             render_freq=10000,
@@ -50,4 +50,4 @@ def main(world: int = 1, stage: int = 1, ckpt_path: str = None):
     trainer.test(model)
 
 if __name__ == "__main__":
-    main(world=2, stage=1, ckpt_path="model/ppomario-test_score=319.10-step=770000.ckpt")
+    main(world=2, stage=2, ckpt_path="model/2-2/ppomario-avg_score=287.22.ckpt")

@@ -1,7 +1,5 @@
-import argparse
 from collections import deque
 import random
-from statistics import mode
 from typing import Any, List, Tuple
 import numpy as np
 
@@ -16,13 +14,14 @@ from torch.distributions import Categorical
 import torch.nn.functional as F
 from pl_bolts.utils import _GYM_AVAILABLE
 from pl_bolts.utils.warnings import warn_missing_pkg
+import wandb
 
-from .modules import PPO
+from .models import PPO
 from .env import make_mario
 from .multienv import MultiEnv
-from icecream import ic
 from .log import log_video
 from tqdm import tqdm
+from loguru import logger
 
 if _GYM_AVAILABLE:
     import gym
@@ -54,7 +53,6 @@ class PPOMario(LightningModule):
         num_workers: int = 1,
         steps_per_epoch: int = 32,
         val_episodes: int = 5,
-        val_interval: int = 5000,
         nb_optim_iters: int = 1,
         clip_ratio: float = 0.2,
         render: bool = True,
@@ -86,7 +84,6 @@ class PPOMario(LightningModule):
         self.lr_decay_epoch = lr_decay_epoch
         self.steps_per_epoch = steps_per_epoch
         self.val_episodes = val_episodes
-        self.val_interval = val_interval
         self.nb_optim_iters = nb_optim_iters
         self.hidden_size = hidden_size
         self.batch_epoch = batch_epoch
@@ -99,24 +96,24 @@ class PPOMario(LightningModule):
         self.clip_ratio = clip_ratio
         self.render = render
         self.save_hyperparameters()
+        self.alpha = 1.0
 
         # self.env = gym.make(env)
         self.demo_env = make_mario(world, stage)
         self.env = MultiEnv(world, stage, num_workers)
         
         self.model = PPO(self.demo_env.observation_space.shape, self.hidden_size, self.demo_env.action_space.n)
-
+        
+        
         self.epoch_rewards = deque(maxlen=100)
 
         self.total_episodes: int = 0
         self.total_steps: int = 0
         self.episode_step = 0
         
-        self.step_rewards = deque(maxlen=100)
         self.end_rewards = deque(maxlen=100)
         self.end_steps = deque(maxlen=100)
         for _ in range(100):
-            self.step_rewards.append(0)
             self.end_rewards.append(0)
             self.end_steps.append(0)
             
@@ -124,32 +121,6 @@ class PPOMario(LightningModule):
         self.ep_steps = [0 for _ in range(self.num_workers)]
 
         self.state = torch.from_numpy(self.env.reset_all())
-    
-    def calc_advantage(self, rewards: Tensor, dones: Tensor, values: Tensor, last_value: Tensor) -> List[float]:
-        """Calculate the advantage given rewards, state values, and the last value of episode.
-        Args:
-            rewards: list of episode rewards
-            values: list of state values from critic
-            last_value: value of last state of episode
-        Returns:
-            list of advantages
-        """
-        # discounted cumulative reward
-        gae = 0
-        rewards = rewards.to(self.device)
-        dones = dones.to(self.device)
-        R = []
-        for value, reward, done in list(zip(values, rewards, dones))[::-1]:
-            gae = gae * self.gamma * self.lam
-            gae = gae + reward + self.gamma * last_value.detach() * (1 - done) - value.detach()
-            last_value = value
-            R.append(gae + value)
-        R = R[::-1]
-        R = torch.cat(R).detach()
-        
-        # return advantages
-        advantages = R - values
-        return R, advantages
 
     def eval_1_episode(self, is_test: bool = False):
         pbar = tqdm(desc="Evaluating", leave=False)
@@ -158,6 +129,7 @@ class PPOMario(LightningModule):
         episode_reward: float = 0
         frames = []
         durations = []
+        
         while not done:
             with torch.no_grad():
                 logits, _ = self.model(state.cuda())
@@ -173,13 +145,25 @@ class PPOMario(LightningModule):
             next_state, reward, done, _ = self.demo_env.step(action)
             episode_reward += reward
             state = torch.FloatTensor(next_state).unsqueeze(0)
+            
         if self.render:
-            log_video(env_name='{}-{}'.format(self.world, self.stage), frames=frames, durations=durations, curr_steps=self.global_step,
-                      episode_reward=episode_reward, fps=24, is_test=is_test)
+            clip = log_video(
+                    env_name='{}-{}'.format(self.world, self.stage),
+                    frames=frames,
+                    durations=durations,
+                    curr_episodes=self.current_epoch,
+                    episode_reward=episode_reward,
+                    fps=24,
+                    is_test=is_test
+                    )
+        else:
+            clip = None
+            
         pbar.close()
-        return episode_reward
+            
+        return clip, episode_reward
     
-    def generate_trajectory_samples(self) -> Tuple[List[Tensor], List[Tensor], List[Tensor]]:
+    def generate_trajectory_samples(self) -> Tuple[List[Tensor], List [Tensor], List[Tensor]]:
         """Contains the logic for generating trajectory data to train policy and value network.
         Yield:
            Tuple of Lists containing tensors for states, actions, log probs, qvals and advantage
@@ -195,7 +179,6 @@ class PPOMario(LightningModule):
         
         self.ep_best_reward = 0
         
-        
         for _ in tqdm(range(self.steps_per_epoch), leave=False, desc="Sampling Batch",
                       bar_format="{desc}: {percentage:3.0f}%|{bar:10}{r_bar}"):
             self.state = self.state.to(device=self.device)
@@ -206,13 +189,23 @@ class PPOMario(LightningModule):
                 action = pi.sample()
                 action = action.squeeze(0)
                 log_prob = pi.log_prob(action)
-            
-            next_state, reward, done, _ = self.env.step(action.cpu().numpy())
-
+            try:
+                next_state, reward, done, _ = self.env.step(action.cpu().numpy())
+            except:
+                action = action.unsqueeze(0)
+                next_state, reward, done, _ = self.env.step(action.cpu().numpy())
+            next_state = torch.FloatTensor(next_state)
+                        
             for i in range(self.num_workers):
                 self.ep_steps[i] += 1
-                self.step_rewards.append(reward[i])
                 self.ep_rewards[i] += reward[i]
+            
+            states.append(self.state)
+            actions.append(action)
+            logp.append(log_prob)
+            dones.append(done)
+            rewards.append(reward)
+            values.append(value)
             
             self.episode_step += 1
             self.total_steps += self.num_workers
@@ -224,14 +217,7 @@ class PPOMario(LightningModule):
                     self.ep_rewards[idx] = 0
                     self.ep_steps[idx] = 0
 
-            states.append(self.state)
-            actions.append(action)
-            logp.append(log_prob)
-            dones.append(done)
-            rewards.append(reward)
-            values.append(value)
-
-            self.state = torch.FloatTensor(next_state)
+            self.state = next_state
 
         self.state = self.state.to(device=self.device) # self.state.shape: torch.Size([P, 4, 84, 84])
         with torch.no_grad():
@@ -263,25 +249,44 @@ class PPOMario(LightningModule):
             for data in train_data:
                 state, action, old_logp, qval, adv = data
                 yield state, action, old_logp, qval, adv
+    
+    def calc_advantage(self, rewards: Tensor, dones: Tensor, values: Tensor, last_value: Tensor) -> List[float]:
+        """Calculate the advantage given rewards, state values, and the last value of episode.
+        Args:
+            rewards: list of episode rewards
+            values: list of state values from critic
+            last_value: value of last state of episode
+        Returns:
+            list of advantages
+        """
+        # discounted cumulative reward
+        gae = 0
+        rewards = rewards.to(self.device)
+        dones = dones.to(self.device)
+        R = []
+        for value, reward, done in list(zip(values, rewards, dones))[::-1]:
+            gae = gae * self.gamma * self.lam
+            gae = gae + reward + self.gamma * last_value.detach() * (1 - done) - value.detach()
+            last_value = value
+            R.append(gae + value)
+        R = R[::-1]
+        R = torch.cat(R).detach()
+        
+        # return advantages
+        advantages = R - values
+        return R, advantages
 
     def actor_loss(self, logits, action, logp_old, adv) -> Tensor:
         pi = Categorical(logits=logits)
         logp = pi.log_prob(action)
         ratio = torch.exp(logp - logp_old)
-        clip_adv = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio) * adv
+        clip_adv = torch.clamp(ratio, 1 - self.clip_ratio * self.alpha, 1 + self.clip_ratio * self.alpha) * adv
         loss_actor = -(torch.min(ratio * adv, clip_adv)).mean()
         return loss_actor
 
     def critic_loss(self, qval, value) -> Tensor:
         loss_critic = F.smooth_l1_loss(qval, value.squeeze())
         return loss_critic
-
-    def on_train_epoch_start(self):
-        self.log("episodes", self.total_episodes, on_epoch=True, prog_bar=True)
-        self.log("avg_ep_len", sum(self.end_steps) / len(self.end_steps), on_epoch=True)
-        self.log("avg_ep_reward", sum(self.end_rewards) / len(self.end_rewards), prog_bar=True, on_epoch=True)
-        self.log("avg_reward", sum(self.step_rewards) / len(self.step_rewards), on_epoch=True)
-        return
     
     def training_step(self, batch: Tuple[Tensor, Tensor], batch_idx):
         """Carries out a single update to actor and critic network from a batch of replay buffer.
@@ -299,35 +304,41 @@ class PPOMario(LightningModule):
         critic_loss = self.critic_loss(qval, value)
         entropy_loss = torch.mean(Categorical(logits=logits).entropy())
         total_loss = actor_loss + critic_loss - self.beta * entropy_loss
-        self.log("actor_loss", actor_loss, on_step=True, logger=True)
-        self.log("critic_loss", critic_loss, on_step=True, logger=True)
-        self.log("entropy_loss", entropy_loss, on_step=True, logger=True)
-        self.log("total_loss", total_loss, on_step=True, logger=True)
+        self.log("loss/actor_loss", actor_loss, on_step=True, logger=True)
+        self.log("loss/critic_loss", critic_loss, on_step=True, logger=True)
+        self.log("loss/entropy_loss", entropy_loss, on_step=True, logger=True)
+        self.log("loss/total_loss", total_loss, on_step=True, logger=True)
+        
+        self.log("num_games", self.total_episodes, prog_bar=True)
+        self.log("performance/avg_ep_len", sum(self.end_steps) / len(self.end_steps))
+        self.log("performance/avg_ep_reward", sum(self.end_rewards) / len(self.end_rewards))
         
         return total_loss
     
-    def on_train_batch_end(self, outputs, batch: Any, batch_idx: int, unused: int = 0) -> None:
-        
-        if self.global_step % self.val_interval == 0:
-            avg_score = self._validation()
-            print('')
-            print(f"Average score: {avg_score:.2f} at step {self.global_step}")
-            self.log("avg_score", avg_score, logger=True, prog_bar=True)
-            
-        return None
+    def on_train_epoch_end(self) -> None:
+        self.alpha = max(1 - (self.current_epoch / self.lr_decay_epoch), 0)
+        self.log("alpha", self.alpha)
     
-    
-    def _validation(self, *args, **kwargs):
+    def validation_step(self, *args, **kwargs):
         val_scores = []
+        if self.render:
+            clips = []
+            
         for _ in tqdm(range(self.val_episodes), desc="Validating in episode", leave=False,
                       bar_format="{desc}: {percentage:3.0f}%|{bar:10}{r_bar}"):
-            val_scores.append(self.eval_1_episode())
+            clip, val_score = self.eval_1_episode()
+            if clip is not None:
+                clips.append(clip)
+            val_scores.append(val_score)
             
         avg_score = sum(val_scores) / len(val_scores)
+        self.log("avg_score", avg_score, logger=True, prog_bar=True)
+        print('')
+        logger.info(f"Episode {self.current_epoch + 1}: Average score: {avg_score:.2f} | num_games: {self.total_episodes}")
         
-        
-        return avg_score
-    
+        if self.render:
+            wandb.log({"gameplay": clips[val_scores.index(max(val_scores))]})
+            
     def test_step(self, *args, **kwargs):
         return self.eval_1_episode(is_test=True)
     
@@ -365,6 +376,7 @@ class PPOMario(LightningModule):
 
     def train_dataloader(self) -> DataLoader:
         """Get train loader."""
+        ic()
         return self._dataloader()
     
     def val_dataloader(self) -> DataLoader:

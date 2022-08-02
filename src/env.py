@@ -44,8 +44,8 @@ def make_mario(world: int = 1, stage: int = 1, action_space: str = 'simple'):
     env = ResizeObservation(env, 84)
     env = GrayScaleObservation(env, keep_dim=False)
     env = TransformObservation(env, lambda x: x.astype(np.float32) / 255.)
-    env = FrameStack(env, num_stack=4)
     env = MaxAndSkipEnv(env, skip=4)
+    env = FrameStack(env, num_stack=4)
     env = CustomReward(env)
     
     return env
