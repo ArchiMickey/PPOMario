@@ -376,7 +376,6 @@ class PPOMario(LightningModule):
 
     def train_dataloader(self) -> DataLoader:
         """Get train loader."""
-        ic()
         return self._dataloader()
     
     def val_dataloader(self) -> DataLoader:
