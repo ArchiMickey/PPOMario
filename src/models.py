@@ -78,6 +78,7 @@ class Actor(nn.Module):
             nn.Linear(conv_out_size, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, num_actions),
+            nn.Softmax(dim=-1),
         )
         self.value_head = nn.Sequential(
             nn.Linear(conv_out_size, hidden_dim),

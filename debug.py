@@ -8,7 +8,7 @@ from src.ppomario import PPOMario
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, ModelSummary
 from datetime import datetime
 
-def main(world: int = 1, stage: int = 1, ckpt_path: str = None):
+def main(world: int = 1, stage: int = 1, ckpt_path: str = None, use_ppg: bool = False):
     
     checkpoint_callback = ModelCheckpoint(
         save_top_k=3,
@@ -29,26 +29,29 @@ def main(world: int = 1, stage: int = 1, ckpt_path: str = None):
         nb_optim_iters=1,
         batch_epoch=12,
         batch_size=4,
-        num_workers=1,
+        num_workers=2,
         hidden_size=512,
         steps_per_epoch=16,
         val_episodes=1,
         render=False,
+        use_ppg=use_ppg,
+        aux_batch_epoch=9,
+        aux_interval=10,
     )
 
-    wandb_logger = WandbLogger(name=f"PPOMario-{world}-{stage}", offline=True)
+    # wandb_logger = WandbLogger(name=f"PPOMario-{world}-{stage}", offline=True)
 
     trainer = pl.Trainer(
         accelerator="gpu",
         devices = 1 if torch.cuda.is_available() else None,
         max_epochs=100000,
-        logger=wandb_logger,
+        # logger=wandb_logger,
         default_root_dir=f"model/{world}-{stage}",
         check_val_every_n_epoch=10,
-        gradient_clip_val= 100,
         auto_lr_find=True,
         callbacks=[checkpoint_callback, LearningRateMonitor(logging_interval='epoch'), ModelSummary(max_depth=5)],
-        enable_progress_bar=False,
+        # enable_progress_bar=False,
+        num_sanity_val_steps=0,
     )
     
     if ckpt_path is not None:
@@ -58,4 +61,4 @@ def main(world: int = 1, stage: int = 1, ckpt_path: str = None):
         trainer.fit(model)
 
 if __name__ == "__main__":
-    main(world=1, stage=1)
+    main(world=1, stage=1, use_ppg=True)
