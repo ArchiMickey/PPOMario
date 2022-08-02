@@ -5,7 +5,7 @@ from src.ppomario import PPOMario
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, ModelSummary
 from datetime import datetime
 
-def main(world: int = 1, stage: int = 1, max_episodes: int = 100000, ckpt_path: str = None):
+def main(world: int = 1, stage: int = 1, max_episodes: int = 10000, ckpt_path: str = None, use_ppg: bool = False,):
     
     checkpoint_callback = ModelCheckpoint(
         save_top_k=3,
@@ -30,6 +30,9 @@ def main(world: int = 1, stage: int = 1, max_episodes: int = 100000, ckpt_path: 
         hidden_size=512,
         steps_per_epoch=512,
         val_episodes=5,
+        use_ppg=use_ppg,
+        aux_batch_epoch=9,
+        aux_interval=32,
     )
 
     wandb_logger = WandbLogger(name=f"PPOMario-{world}-{stage}")
@@ -53,4 +56,4 @@ def main(world: int = 1, stage: int = 1, max_episodes: int = 100000, ckpt_path: 
         trainer.fit(model)
 
 if __name__ == "__main__":
-    main(world=2, stage=2, max_episodes=100000)
+    main(world=2, stage=2, max_episodes=10000)

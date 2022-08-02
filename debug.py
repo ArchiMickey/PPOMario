@@ -27,31 +27,31 @@ def main(world: int = 1, stage: int = 1, ckpt_path: str = None, use_ppg: bool = 
         lr_decay_ratio=0,
         lr_decay_epoch=100000,
         nb_optim_iters=1,
-        batch_epoch=12,
+        batch_epoch=1,
         batch_size=4,
-        num_workers=2,
+        num_workers=6,
         hidden_size=512,
-        steps_per_epoch=16,
-        val_episodes=1,
-        render=False,
+        steps_per_epoch=128,
+        val_episodes=3,
+        render=True,
         use_ppg=use_ppg,
         aux_batch_epoch=9,
-        aux_interval=10,
+        aux_interval=16,
     )
 
-    # wandb_logger = WandbLogger(name=f"PPOMario-{world}-{stage}", offline=True)
+    wandb_logger = WandbLogger(name=f"PPOMario-{world}-{stage}", offline=True)
 
     trainer = pl.Trainer(
         accelerator="gpu",
         devices = 1 if torch.cuda.is_available() else None,
         max_epochs=100000,
-        # logger=wandb_logger,
+        logger=wandb_logger,
         default_root_dir=f"model/{world}-{stage}",
-        check_val_every_n_epoch=10,
+        check_val_every_n_epoch=15,
         auto_lr_find=True,
         callbacks=[checkpoint_callback, LearningRateMonitor(logging_interval='epoch'), ModelSummary(max_depth=5)],
         # enable_progress_bar=False,
-        num_sanity_val_steps=0,
+        # num_sanity_val_steps=0,
     )
     
     if ckpt_path is not None:

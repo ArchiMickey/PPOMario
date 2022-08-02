@@ -177,7 +177,7 @@ class PPOMario(LightningModule):
                     curr_episodes=self.current_epoch + 1,
                     episode_reward=episode_reward,
                     fps=24,
-                    is_test=is_test
+                    is_test=is_test,
                     )
         else:
             clip = None
@@ -347,7 +347,8 @@ class PPOMario(LightningModule):
         
         dl = create_shuffled_dataloader([states, old_action_probs, rewards, old_values], batch_size=self.batch_size)
         for epoch in range(self.aux_batch_epoch):
-            for states, old_action_probs, rewards, old_values in tqdm(dl, desc=f"auxiliary epoch {epoch}", leave=False):
+            for states, old_action_probs, rewards, old_values in tqdm(dl, desc=f"auxiliary epoch {epoch}", leave=False,
+                                                                      bar_format="{desc}: {percentage:3.0f}%|{bar:10}{r_bar}"):
                 action_probs, policy_values = self.model.actor(states)
                 action_logprobs = action_probs.log()
                 
@@ -413,7 +414,14 @@ class PPOMario(LightningModule):
                 },
                 on_step=True,
             )
-            self.log("loss", total_loss, prog_bar=True, logger=False)
+            self.log_dict(
+                {
+                    "policy_loss": policy_loss,
+                    "value_loss": value_loss,
+                },
+                logger=False,
+                prog_bar=True,
+            )
             
         else:
             logits, value = self.model(states)
@@ -441,6 +449,7 @@ class PPOMario(LightningModule):
         
         if self.use_ppg and self.current_epoch % self.aux_interval == 0 and self.current_epoch > 0:
             self.learn_aux(self.aux_memories)
+            self.aux_memories.clear()
     
     def validation_step(self, *args, **kwargs):
         val_scores = []
