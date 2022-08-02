@@ -48,6 +48,7 @@ def main(world: int = 1, stage: int = 1, ckpt_path: str = None):
         gradient_clip_val= 100,
         auto_lr_find=True,
         callbacks=[checkpoint_callback, LearningRateMonitor(logging_interval='epoch'), ModelSummary(max_depth=5)],
+        enable_progress_bar=False,
     )
     
     if ckpt_path is not None:
