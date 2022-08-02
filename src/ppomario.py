@@ -1,4 +1,4 @@
-from collections import deque
+from collections import deque, namedtuple
 import random
 from typing import Any, List, Tuple
 import numpy as np
@@ -16,18 +16,19 @@ from pl_bolts.utils import _GYM_AVAILABLE
 from pl_bolts.utils.warnings import warn_missing_pkg
 import wandb
 
-from .models import PPO
+from .models import PPO, PPG
 from .env import make_mario
 from .multienv import MultiEnv
 from .log import log_video
 from tqdm import tqdm
 from loguru import logger
 
+from .dataloader import create_shuffled_dataloader
+
 if _GYM_AVAILABLE:
     import gym
 else:  # pragma: no cover
     warn_missing_pkg("gym")
-
 
 class PPOMario(LightningModule):
     """PyTorch Lightning implementation of `Proximal Policy Optimization.
@@ -56,6 +57,7 @@ class PPOMario(LightningModule):
         nb_optim_iters: int = 1,
         clip_ratio: float = 0.2,
         render: bool = True,
+        use_ppg: bool = False,
         **kwargs: Any,
     ) -> None:
         """
@@ -97,13 +99,18 @@ class PPOMario(LightningModule):
         self.render = render
         self.save_hyperparameters()
         self.alpha = 1.0
+        self.use_ppg = use_ppg
 
         # self.env = gym.make(env)
         self.demo_env = make_mario(world, stage)
         self.env = MultiEnv(world, stage, num_workers)
         
-        self.model = PPO(self.demo_env.observation_space.shape, self.hidden_size, self.demo_env.action_space.n)
+        if self.use_ppg:
+            self.automatic_optimization = False
+            self.model = PPG(self.demo_env.observation_space.shape, self.hidden_size, self.demo_env.action_space.n)
         
+        else:
+            self.model = PPO(self.demo_env.observation_space.shape, self.hidden_size, self.demo_env.action_space.n)
         
         self.epoch_rewards = deque(maxlen=100)
 
@@ -151,7 +158,7 @@ class PPOMario(LightningModule):
                     env_name='{}-{}'.format(self.world, self.stage),
                     frames=frames,
                     durations=durations,
-                    curr_episodes=self.current_epoch,
+                    curr_episodes=self.current_epoch + 1,
                     episode_reward=episode_reward,
                     fps=24,
                     is_test=is_test
@@ -230,6 +237,8 @@ class PPOMario(LightningModule):
         ep_values = torch.cat(values).squeeze().detach()
         ep_rewards = torch.FloatTensor(rewards)
         ep_dones = torch.FloatTensor(dones)
+        
+        ic(batch_states.shape, batch_actions.shape, batch_logp.shape, ep_values.shape, ep_rewards.shape, ep_dones.shape)
           
         # advantage
         qval, adv = self.calc_advantage(ep_rewards, ep_dones, ep_values, last_value)
@@ -288,6 +297,11 @@ class PPOMario(LightningModule):
         loss_critic = F.smooth_l1_loss(qval, value.squeeze())
         return loss_critic
     
+    def update_network(self, loss: Tensor, optimizer: torch.optim.Optimizer):
+        optimizer.zero_grad()
+        loss.mean().backward()
+        optimizer.step()
+    
     def training_step(self, batch: Tuple[Tensor, Tensor], batch_idx):
         """Carries out a single update to actor and critic network from a batch of replay buffer.
         Args:
@@ -309,7 +323,7 @@ class PPOMario(LightningModule):
         self.log("loss/entropy_loss", entropy_loss, on_step=True, logger=True)
         self.log("loss/total_loss", total_loss, on_step=True, logger=True)
         
-        self.log("num_games", self.total_episodes, prog_bar=True)
+        self.log("train/num_games", self.total_episodes, prog_bar=True)
         self.log("performance/avg_ep_len", sum(self.end_steps) / len(self.end_steps))
         self.log("performance/avg_ep_reward", sum(self.end_rewards) / len(self.end_rewards))
         
@@ -317,7 +331,7 @@ class PPOMario(LightningModule):
     
     def on_train_epoch_end(self) -> None:
         self.alpha = max(1 - (self.current_epoch / self.lr_decay_epoch), 0)
-        self.log("alpha", self.alpha)
+        self.log("train/alpha", self.alpha)
     
     def validation_step(self, *args, **kwargs):
         val_scores = []
@@ -332,7 +346,7 @@ class PPOMario(LightningModule):
             val_scores.append(val_score)
             
         avg_score = sum(val_scores) / len(val_scores)
-        self.log("avg_score", avg_score, logger=True, prog_bar=True)
+        self.log("performance/avg_score", avg_score, logger=True)
         print('')
         logger.info(f"Episode {self.current_epoch + 1}: Average score: {avg_score:.2f} | num_games: {self.total_episodes}")
         
@@ -352,16 +366,20 @@ class PPOMario(LightningModule):
     
     def configure_optimizers(self) -> List[Optimizer]:
         """Initialize Adam optimizer."""
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, capturable=True)
-        lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=self.lr_decay_ratio, total_iters=self.lr_decay_epoch)
-        
-        return [optimizer], [lr_scheduler]
+        if not self.use_ppg:
+            optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, capturable=True)
+            lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=self.lr_decay_ratio, total_iters=self.lr_decay_epoch)
+            
+            return [optimizer], [lr_scheduler]
 
-    def optimizer_step(self, *args, **kwargs):
-        """Run ``nb_optim_iters`` number of iterations of gradient descent on actor and critic for each data
-        sample."""
-        for _ in range(self.nb_optim_iters):
-            super().optimizer_step(*args, **kwargs)
+        else:
+            opt_actor = torch.optim.Adam(self.model.actor.parameters(), lr=self.lr, capturable=True)
+            opt_critic = torch.optim.Adam(self.model.critic.parameters(), lr=self.lr, capturable=True)
+            
+            actor_lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=self.lr_decay_ratio, total_iters=self.lr_decay_epoch)
+            critic_lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=self.lr_decay_ratio, total_iters=self.lr_decay_epoch)
+            
+            return [opt_actor, opt_critic], [actor_lr_scheduler, critic_lr_scheduler]
 
     def _dataloader(self) -> DataLoader:
         """Initialize the Replay Buffer dataset used for retrieving experiences."""
