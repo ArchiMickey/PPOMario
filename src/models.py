@@ -50,12 +50,21 @@ class PPO(nn.Module):
         conv_out = self.conv(x)
         return self.actor_head(conv_out), self.critic_head(conv_out)
 
+def init_(m):
+    if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
+        gain = nn.init.calculate_gain('relu')
+        nn.init.orthogonal_(m.weight, gain)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
 class PPG(nn.Module):
     def __init__(self, state_dim, hidden_dim, num_actions) -> None:
         super().__init__()
         
         self.actor = Actor(state_dim, hidden_dim, num_actions)
         self.critic = Critic(state_dim, hidden_dim)
+        self.apply(init_)
+    
 
 class Actor(nn.Module):
     def __init__(self, state_dim, hidden_dim, num_actions) -> None:
