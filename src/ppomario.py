@@ -178,6 +178,7 @@ class PPOMario(LightningModule):
                     episode_reward=episode_reward,
                     fps=24,
                     is_test=is_test,
+                    use_ppg=self.use_ppg,
                     )
         else:
             clip = None
@@ -321,30 +322,31 @@ class PPOMario(LightningModule):
             actor_opt, critic_opt = self.optimizers()
             if self.should_aux:
                 for epoch in range(self.aux_batch_epoch):
-                    for states, old_action_probs, rewards, old_values in tqdm(self.aux_dl, desc=f"auxiliary epoch {epoch}", leave=False):
+                    for states, old_action_probs, rewards, old_values in tqdm(self.aux_dl, desc=f"Auxiliary epoch {epoch}", leave=False,
+                                                                              bar_format="{desc}: {percentage:3.0f}%|{bar:10}{r_bar}"):
                         action_probs, policy_values = self.model.actor(states)
                         action_logprobs = action_probs.log()
                         aux_loss = clipped_value_loss(policy_values.squeeze(-1), rewards, old_values, self.value_clip)
                         kl_loss = F.kl_div(action_logprobs, old_action_probs, reduction='batchmean')
                         policy_loss = aux_loss + kl_loss
                         self._update_network(policy_loss, actor_opt)
-                        
                         values = self.model.critic(states)
                         values = values.squeeze(-1)
                         value_loss = clipped_value_loss(values, rewards, old_values, self.value_clip)
                         self._update_network(value_loss, critic_opt)
-                        self.log_dict(
-                            {
-                                "loss/aux_loss": aux_loss,
-                                "loss/kl_loss": kl_loss,
-                                "loss/policy_loss": policy_loss,
-                                "loss/value_loss": value_loss,
-                            },
-                            on_step=True,
-                        )
+                        
+                        if self.global_step % self.trainer.log_every_n_steps == 0:
+                            self.logger.log_metrics(
+                                {
+                                    "loss/aux_loss": aux_loss,
+                                    "loss/kl_loss": kl_loss,
+                                    "loss/policy_loss": policy_loss,
+                                    "loss/value_loss": value_loss,
+                                },
+                                step=self.global_step,
+                            )
                 self.aux_dl = None
                 self.should_aux = False
-            
             states, actions, old_logps, qvals, advs = batch
             action_probs, _ = self.model.actor(states)
             values = self.model.critic(states)
@@ -401,16 +403,17 @@ class PPOMario(LightningModule):
             self.log("loss/entropy_loss", entropy_loss, on_step=True, logger=True)
             self.log("loss/total_loss", total_loss, on_step=True, logger=True)
         
-        self.log("train/num_games", self.total_episodes, prog_bar=True)
-        self.log("performance/avg_ep_len", np.mean(self.ep_steps))
-        self.log("performance/avg_ep_score", np.mean(self.ep_scores))
-        
         return total_loss
+    
+    def on_train_epoch_start(self) -> None:
+        self.log("train/num_games", self.total_episodes)
+        self.log("train/avg_ep_len", np.mean(self.ep_steps))
+        self.log("train/avg_ep_score", np.mean(self.ep_scores))
     
     def on_train_epoch_end(self) -> None:
         # self.alpha = max(1 - (self.global_step / self.lr_decay_step), 0)
         # self.log("train/alpha", self.alpha)
-        if (self.current_epoch + 1) % self.aux_interval == 0:
+        if self.use_ppg and (self.current_epoch + 1) % self.aux_interval == 0:
             self.aux_dl = self.aux_dataloader(self.aux_memories)
             self.aux_memories.clear()
             self.should_aux = True
@@ -428,13 +431,9 @@ class PPOMario(LightningModule):
             val_scores.append(val_score)
             
         avg_score = sum(val_scores) / len(val_scores)
-        self.log("avg_score", avg_score, logger=True)
-        
+        self.log("benchmark/avg_score", avg_score, logger=True)
         print('')
-        log_str = f"Episode {self.current_epoch + 1}: Average score: {avg_score:.2f} | num_games: {self.total_episodes}"
-        print('|' + '=' * len(log_str) + '|')
-        print('|' + log_str + '|')
-        print('|' + '=' * len(log_str) + '|')
+        logger.info(f"Episode {self.current_epoch + 1}: Average score: {avg_score:.2f}")
         
         if self.render:
             wandb.log({"video/gameplay": clips[val_scores.index(max(val_scores))]})
@@ -467,9 +466,7 @@ class PPOMario(LightningModule):
             
             return [opt_actor, opt_critic], [actor_lr_scheduler, critic_lr_scheduler]
     
-    def aux_dataloader(self, aux_memories):
-        # actor_opt, critic_opt = self.optimizers()
-        
+    def aux_dataloader(self, aux_memories):        
         states = []
         rewards = []
         old_values = [] 
