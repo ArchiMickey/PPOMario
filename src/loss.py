@@ -1,8 +1,37 @@
+from typing import List, Tuple
 import torch
 from torch import Tensor
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
+def calc_advantage(gamma: float, lam: float, rewards: Tensor, dones: Tensor, values: Tensor, last_value: Tensor, device, use_ppg=False) -> Tuple[Tensor, Tensor]:
+        """Calculate the advantage given rewards, state values, and the last value of episode.
+        Args:
+            rewards: list of episode rewards
+            values: list of state values from critic
+            last_value: value of last state of episode
+        Returns:
+            list of advantages
+        """
+        # discounted cumulative reward
+        gae = 0
+        rewards = rewards.to(device)
+        dones = dones.to(device)
+        if use_ppg:
+            values = values + last_value.mean()
+        R = []
+        for value, reward, done in list(zip(values, rewards, dones))[::-1]:
+            gae = gae * gamma * lam
+            # ic(last_value.shape, done.shape, value.shape)
+            gae = gae + reward + gamma * last_value.detach() * (1 - done) - value.detach()
+            last_value = value
+            R.append(gae + value)
+        R = R[::-1]
+        R = torch.stack(R)
+        
+        # return advantages
+        advantages = R - values
+        return R, advantages
 
 def cal_actor_loss(logits, action, logp_old, adv, clip_ratio, alpha) -> Tensor:
         pi = Categorical(logits=logits)
