@@ -17,7 +17,9 @@ checkpoint_callback = ModelCheckpoint(
 
 def main(world: int = 1, stage: int = 1, ckpt_path: str = None):
     if ckpt_path is not None:
-        model = PPOMario.load_from_checkpoint(ckpt_path)
+        model = PPOMario.load_from_checkpoint(ckpt_path,
+                                              num_workers=1,
+                                              )
     
     else:
         model = PPOMario(
@@ -50,4 +52,4 @@ def main(world: int = 1, stage: int = 1, ckpt_path: str = None):
     trainer.test(model)
 
 if __name__ == "__main__":
-    main(world=2, stage=2, ckpt_path="model/2-2/ppomario-avg_score=287.22.ckpt")
+    main(world=2, stage=2, ckpt_path="model/ppg/1-1/last.ckpt")
