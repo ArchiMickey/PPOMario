@@ -121,6 +121,7 @@ class PPOMario(LightningModule):
         self.env_actor = MultiActor(world, stage, num_workers, num_envs)
         
         if self.use_ppg:
+            self.aux_step = 0
             self.should_aux = False
             self.aux_memories = deque([])
             self.aux_dl = None
@@ -302,7 +303,7 @@ class PPOMario(LightningModule):
                 state, action, old_logp, qval, adv = data
                 yield state, action, old_logp, qval, adv
     
-    def _update_network(self, loss: Tensor, optimizer: torch.optim.Optimizer):
+    def _update_network(self, loss: Tensor, optimizer: Optimizer):
         optimizer.zero_grad()
         self.manual_backward(loss)
         optimizer.step()
@@ -334,14 +335,14 @@ class PPOMario(LightningModule):
                         values = values.squeeze(-1)
                         value_loss = clipped_value_loss(values, rewards, old_values, self.value_clip)
                         self._update_network(value_loss, critic_opt)
-                        
                         if self.global_step % self.trainer.log_every_n_steps == 0:
                             self.logger.log_metrics(
                                 {
-                                    "loss/aux_loss": aux_loss,
-                                    "loss/kl_loss": kl_loss,
-                                    "loss/policy_loss": policy_loss,
-                                    "loss/value_loss": value_loss,
+                                    "aux/aux_step": self.aux_step,
+                                    "aux/aux_loss": aux_loss,
+                                    "aux/aux_kl_loss": kl_loss,
+                                    "aux/policy_loss": policy_loss,
+                                    "aux/value_loss": value_loss,
                                 },
                                 step=self.global_step,
                             )
@@ -377,7 +378,6 @@ class PPOMario(LightningModule):
                     "loss/value_loss": value_loss,
                     "loss/total_loss": total_loss,
                 },
-                on_step=True,
             )
             self.log_dict(
                 {
@@ -405,14 +405,12 @@ class PPOMario(LightningModule):
         
         return total_loss
     
-    def on_train_epoch_start(self) -> None:
-        self.log("train/num_games", self.total_episodes)
-        self.log("train/avg_ep_len", np.mean(self.ep_steps))
-        self.log("train/avg_ep_score", np.mean(self.ep_scores))
-    
     def on_train_epoch_end(self) -> None:
         # self.alpha = max(1 - (self.global_step / self.lr_decay_step), 0)
         # self.log("train/alpha", self.alpha)
+        self.log("train/num_games", self.total_episodes)
+        self.log("train/avg_ep_len", np.mean(self.ep_steps))
+        self.log("train/avg_ep_score", np.mean(self.ep_scores))
         if self.use_ppg and (self.current_epoch + 1) % self.aux_interval == 0:
             self.aux_dl = self.aux_dataloader(self.aux_memories)
             self.aux_memories.clear()
