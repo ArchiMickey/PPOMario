@@ -16,7 +16,7 @@ def main(world: int = 1, stage: int = 1, max_steps: int = 10000, ckpt_path: str 
     
     
     checkpoint_callback = ModelCheckpoint(
-        monitor="avg_score",
+        monitor="benchmark/avg_score",
         mode="max",
         save_top_k=3,
         dirpath=ckpt_save_path,
@@ -36,16 +36,16 @@ def main(world: int = 1, stage: int = 1, max_steps: int = 10000, ckpt_path: str 
         # lr_decay_epoch=max_episodes,
         batch_epoch=1,
         batch_size=8,
-        num_workers=6,
-        num_envs=2,
+        num_workers=1,
+        num_envs=1,
         hidden_size=512,
         steps_per_epoch=512,
         val_episodes=5,
         render=True,
         use_ppg=use_ppg,
         aux_batch_size=16,
-        aux_batch_epoch=9,
-        aux_interval=2,
+        aux_batch_epoch=6,
+        aux_interval=16,
     )
 
     wandb_logger = WandbLogger(name=run_name)
@@ -58,6 +58,7 @@ def main(world: int = 1, stage: int = 1, max_steps: int = 10000, ckpt_path: str 
         logger=wandb_logger,
         default_root_dir=f"model/{world}-{stage}",
         check_val_every_n_epoch=20,
+        reload_dataloaders_every_n_epochs=model.batch_epoch,
         num_sanity_val_steps=0,
         auto_lr_find=True,
         callbacks=[checkpoint_callback, LearningRateMonitor(logging_interval='epoch'), ModelSummary(max_depth=5)],
