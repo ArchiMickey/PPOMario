@@ -34,11 +34,11 @@ def main(world: int = 1, stage: int = 1, ckpt_path: str = None, use_ppg: bool = 
         lr_decay_ratio=0,
         lr_decay_epoch=10000,
         batch_epoch=10,
-        batch_size=2,
-        num_workers=2,
-        num_envs=2,
+        batch_size=512,
+        num_workers=4,
+        num_envs=8,
         hidden_size=512,
-        steps_per_epoch=4,
+        steps_per_epoch=512,
         val_episodes=3,
         render=False,
         use_ppg=use_ppg,
@@ -55,7 +55,7 @@ def main(world: int = 1, stage: int = 1, ckpt_path: str = None, use_ppg: bool = 
         max_epochs=10000,
         logger=wandb_logger,
         default_root_dir=f"model/{world}-{stage}",
-        check_val_every_n_epoch=20,
+        check_val_every_n_epoch=2 * model.batch_epoch,
         auto_lr_find=True,
         log_every_n_steps=20,
         callbacks=[checkpoint_callback, LearningRateMonitor(logging_interval='epoch'), ModelSummary(max_depth=5)],
@@ -71,4 +71,4 @@ def main(world: int = 1, stage: int = 1, ckpt_path: str = None, use_ppg: bool = 
         trainer.fit(model)
 
 if __name__ == "__main__":
-    main(world=1, stage=1, use_ppg=True)
+    main(world=1, stage=1, use_ppg=False)

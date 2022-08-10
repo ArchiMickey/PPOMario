@@ -175,7 +175,7 @@ class PPOMario(LightningModule):
                     env_name='{}-{}'.format(self.world, self.stage),
                     frames=frames,
                     durations=durations,
-                    curr_episodes=self.current_epoch + 1,
+                    curr_episodes=self.curr_episode,
                     episode_reward=episode_reward,
                     fps=24,
                     is_test=is_test,
@@ -384,7 +384,8 @@ class PPOMario(LightningModule):
             logger=False,
             prog_bar=True,
         )
-        self.log_dict(
+        if self.global_step % self.trainer.log_every_n_steps == 0:
+            self.logger.log_metrics(
                 {
                     "loss/entropy_loss": entropy_loss,
                     "loss/actor_loss": actor_loss,
@@ -392,6 +393,7 @@ class PPOMario(LightningModule):
                     ("loss/value_loss" if self.use_ppg else "loss/critic_loss"): (value_loss if self.use_ppg else critic_loss),
                     "loss/total_loss": total_loss,
                 },
+                step=self.global_step,
             )
         
         return total_loss
@@ -399,10 +401,14 @@ class PPOMario(LightningModule):
     def on_train_epoch_end(self) -> None:
         # self.alpha = max(1 - (self.global_step / self.lr_decay_step), 0)
         # self.log("train/alpha", self.alpha)
-        self.log("train/episode", self.curr_episode)
-        self.log("train/num_games", self.total_episodes)
-        self.log("train/avg_ep_len", np.mean(self.ep_steps))
-        self.log("train/avg_ep_score", np.mean(self.ep_scores))
+        self.log_dict(
+            {
+                "train/episode": self.curr_episode,
+                "train/num_games": self.total_episodes,
+                "train/avg_ep_len": np.mean(self.ep_steps),
+                "train/avg_ep_score": np.mean(self.ep_scores),
+            },
+        )
         # if (self.total_episodes + 1) % 20 == 0:
         #     logger.info()
         if self.use_ppg and (self.current_epoch + 1) % self.aux_interval_epoch == 0:
@@ -422,7 +428,12 @@ class PPOMario(LightningModule):
             val_scores.append(val_score)
             
         avg_score = sum(val_scores) / len(val_scores)
-        self.log("benchmark/avg_score", avg_score, logger=True)
+        self.logger.log_metrics(
+            {
+                "benchmark/avg_score": avg_score,
+            },
+            step=self.global_step,
+        )
         print('')
         logger.info(f"Episode {self.curr_episode}: Average score: {avg_score:.2f}")
         
