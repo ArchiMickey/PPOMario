@@ -1,6 +1,7 @@
 from collections import namedtuple
 from torch.utils.data import Dataset, DataLoader
 
+Memory = namedtuple('Memory', ['state', 'action', 'old_logp', 'qval', 'adv'])
 AuxMemory = namedtuple('Memory', ['state', 'target_value', 'old_values'])
 
 class ExperienceDataset(Dataset):
@@ -14,6 +15,6 @@ class ExperienceDataset(Dataset):
     def __getitem__(self, ind):
         return tuple(map(lambda t: t[ind], self.data))
 
-def create_shuffled_dataloader(data, batch_size):
+def create_shuffled_dataloader(data, batch_size, num_workers=0):
     ds = ExperienceDataset(data)
-    return DataLoader(ds, batch_size = batch_size, shuffle = True)
+    return DataLoader(ds, batch_size = batch_size, shuffle = True, num_workers=num_workers)

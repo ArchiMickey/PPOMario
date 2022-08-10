@@ -34,10 +34,10 @@ def main(world: int = 1, stage: int = 1, max_steps: int = 10000, ckpt_path: str 
         lr=2.5e-4,
         lr_decay_ratio=0,
         # lr_decay_epoch=max_episodes,
-        batch_epoch=1,
-        batch_size=8,
-        num_workers=1,
-        num_envs=1,
+        batch_epoch=10,
+        batch_size=512,
+        num_workers=4,
+        num_envs=10,
         hidden_size=512,
         steps_per_epoch=512,
         val_episodes=5,
@@ -57,7 +57,7 @@ def main(world: int = 1, stage: int = 1, max_steps: int = 10000, ckpt_path: str 
         max_steps=max_steps,
         logger=wandb_logger,
         default_root_dir=f"model/{world}-{stage}",
-        check_val_every_n_epoch=20,
+        check_val_every_n_epoch=20 * model.batch_epoch,
         reload_dataloaders_every_n_epochs=model.batch_epoch,
         num_sanity_val_steps=0,
         auto_lr_find=True,
@@ -71,4 +71,4 @@ def main(world: int = 1, stage: int = 1, max_steps: int = 10000, ckpt_path: str 
         trainer.fit(model)
 
 if __name__ == "__main__":
-    main(world=1, stage=1, max_steps=1000000, use_ppg=True)
+    main(world=1, stage=2, max_steps=2000000, use_ppg=False)

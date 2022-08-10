@@ -33,8 +33,8 @@ def calc_advantage(gamma: float, lam: float, rewards: Tensor, dones: Tensor, val
         advantages = R - values
         return R, advantages
 
-def cal_actor_loss(logits, action, logp_old, adv, clip_ratio, alpha) -> Tensor:
-        pi = Categorical(logits=logits)
+def cal_actor_loss(action_probs, action, logp_old, adv, clip_ratio, alpha) -> Tensor:
+        pi = Categorical(action_probs)
         logp = pi.log_prob(action)
         ratio = torch.exp(logp - logp_old)
         clip_adv = torch.clamp(ratio, 1 - clip_ratio * alpha, 1 + clip_ratio * alpha) * adv
