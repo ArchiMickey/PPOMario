@@ -1,16 +1,13 @@
 from collections import deque
-from email import policy
-import random
-from typing import Any, Dict, List, Tuple
+from typing import Any, List, Tuple
 import numpy as np
 
 import torch
 from pytorch_lightning import LightningModule, Trainer
-from torch import Tensor, device
+from torch import Tensor
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
 
-from pl_bolts.datamodules import ExperienceSourceDataset
 from torch.distributions import Categorical
 import torch.nn.functional as F
 from pl_bolts.utils import _GYM_AVAILABLE
@@ -48,8 +45,6 @@ class PPOMario(LightningModule):
         beta: float = 0.01,
         lr: float = 1e-4,
         lr_decay_ratio: float = 0.1,
-        lr_decay_epoch: int = 350,
-        lr_decay_step: int = 100000,
         max_episode_len: float = 200,
         hidden_size: int = 128,
         batch_epoch: int = 10,
@@ -91,8 +86,6 @@ class PPOMario(LightningModule):
         self.stage = stage
         self.lr = lr
         self.lr_decay_ratio = lr_decay_ratio
-        self.lr_decay_epoch = lr_decay_epoch
-        self.lr_decay_step = lr_decay_step
         self.steps_per_epoch = steps_per_epoch
         self.val_episodes = val_episodes
         self.nb_optim_iters = nb_optim_iters
@@ -120,8 +113,8 @@ class PPOMario(LightningModule):
         self.demo_env = make_mario(world, stage)
         self.env_actor = MultiActor(world, stage, num_workers, num_envs)
         
+        self.automatic_optimization = False
         if self.use_ppg:
-            self.automatic_optimization = False
             self.model = PPG(self.demo_env.observation_space.shape, self.hidden_size, self.demo_env.action_space.n)
         else:
             self.model = PPO(self.demo_env.observation_space.shape, self.hidden_size, self.demo_env.action_space.n)
@@ -366,6 +359,8 @@ class PPOMario(LightningModule):
             self._update_network(value_loss, critic_opt)
             
         else:
+            opt = self.optimizers()
+            sch = self.lr_schedulers()
             states, actions, old_logps, qvals, advs = batch
             advs = normalize(advs)
             action_probs , values = self.model(states)
@@ -384,23 +379,23 @@ class PPOMario(LightningModule):
             logger=False,
             prog_bar=True,
         )
-        if self.global_step % self.trainer.log_every_n_steps == 0:
-            self.logger.log_metrics(
-                {
-                    "loss/entropy_loss": entropy_loss,
-                    "loss/actor_loss": actor_loss,
-                    "loss/policy_loss": policy_loss,
-                    ("loss/value_loss" if self.use_ppg else "loss/critic_loss"): (value_loss if self.use_ppg else critic_loss),
-                    "loss/total_loss": total_loss,
-                },
-                step=self.global_step,
-            )
         
-        return total_loss
-    
+        self.alpha = max(1 - (self.global_step / self.trainer.max_steps), 0)
+        self._update_network(total_loss, opt)
+        sch.step()
+        
+        self.log_dict(
+            {
+                "train/alpha": self.alpha,
+                "loss/entropy_loss": entropy_loss,
+                "loss/actor_loss": actor_loss,
+                "loss/policy_loss": policy_loss,
+                ("loss/value_loss" if self.use_ppg else "loss/critic_loss"): (value_loss if self.use_ppg else critic_loss),
+                "loss/total_loss": total_loss,
+            },
+        )
+        
     def on_train_epoch_end(self) -> None:
-        # self.alpha = max(1 - (self.global_step / self.lr_decay_step), 0)
-        # self.log("train/alpha", self.alpha)
         self.log_dict(
             {
                 "train/episode": self.curr_episode,
@@ -409,8 +404,7 @@ class PPOMario(LightningModule):
                 "train/avg_ep_score": np.mean(self.ep_scores),
             },
         )
-        # if (self.total_episodes + 1) % 20 == 0:
-        #     logger.info()
+        
         if self.use_ppg and (self.current_epoch + 1) % self.aux_interval_epoch == 0:
             self.aux_dl = self.aux_dataloader(self.aux_memories)
             self.aux_memories.clear()
@@ -428,12 +422,7 @@ class PPOMario(LightningModule):
             val_scores.append(val_score)
             
         avg_score = sum(val_scores) / len(val_scores)
-        self.logger.log_metrics(
-            {
-                "benchmark/avg_score": avg_score,
-            },
-            step=self.global_step,
-        )
+        self.log("benchmark/avg_score", avg_score)
         print('')
         logger.info(f"Episode {self.curr_episode}: Average score: {avg_score:.2f}")
         
