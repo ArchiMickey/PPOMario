@@ -14,7 +14,7 @@ from pl_bolts.utils import _GYM_AVAILABLE
 from pl_bolts.utils.warnings import warn_missing_pkg
 import wandb
 
-from .models import PPO
+from .models import PPG, PPO
 from .env import make_mario
 from .multienv import MultiActor
 from .log import log_video
@@ -56,6 +56,10 @@ class PPOMario(LightningModule):
         clip_ratio: float = 0.2,
         value_clip: float = 0.4,
         render: bool = True,
+        use_ppg: bool = False,
+        aux_batch_size: int = 16,
+        aux_batch_epoch: int = 9,
+        aux_interval: int = 2,
         **kwargs: Any,
     ) -> None:
         """
@@ -94,6 +98,10 @@ class PPOMario(LightningModule):
         self.max_episode_len = max_episode_len
         self.clip_ratio = clip_ratio
         self.render = render
+        self.value_clip = value_clip
+        self.aux_batch_size = aux_batch_size
+        self.aux_batch_epoch = aux_batch_epoch
+        self.aux_interval_epoch = aux_interval * batch_epoch
         self.save_hyperparameters()
         self.alpha = 1.0
 
@@ -102,9 +110,13 @@ class PPOMario(LightningModule):
         self.env_actor = MultiActor(world, stage, num_workers, num_envs)
         
         self.automatic_optimization = False
-        self.model = PPO(self.demo_env.observation_space.shape, self.hidden_size, self.demo_env.action_space.n)
+        self.model = PPG(self.demo_env.observation_space.shape, self.hidden_size, self.demo_env.action_space.n)
         
         self.memories = deque([])
+        self.aux_step = 0
+        self.should_aux = False
+        self.aux_memories = deque([])
+        self.aux_dl = None
         
         self.ep_scores = deque([0 for _ in range(100)], maxlen=100)
         self.ep_steps = deque([0 for _ in range(100)], maxlen=100)
@@ -126,7 +138,7 @@ class PPOMario(LightningModule):
         
         while not done:
             with torch.no_grad():
-                action_prob, _ = self.model(state.cuda())
+                action_prob, _ = self.model.actor(state.cuda())
                 dist = Categorical(action_prob)
                 action = dist.sample()
                 action = action.squeeze(0).cpu().numpy().item()
@@ -149,7 +161,7 @@ class PPOMario(LightningModule):
                     episode_reward=episode_reward,
                     fps=24,
                     is_test=is_test,
-                    use_ppg=False,
+                    use_ppg=True,
                     )
         else:
             clip = None
@@ -178,7 +190,9 @@ class PPOMario(LightningModule):
             self.state = self.state.to(device=self.device)
 
             with torch.no_grad():
-                action_probs, value = self.model(self.state.view(-1, *self.state.shape[2:]))
+                action_probs, _ = self.model.actor(self.state.view(-1, *self.state.shape[2:]))
+                value = self.model.critic(self.state.view(-1, *self.state.shape[2:]))
+                
                 action_probs = action_probs.reshape(self.num_workers, self.num_envs, -1)
                 value = value.reshape(self.num_workers, self.num_envs)
                 
@@ -218,7 +232,7 @@ class PPOMario(LightningModule):
 
         self.state = self.state.to(device=self.device)
         with torch.no_grad():
-            _, last_value = self.model(self.state.view(-1, *self.state.shape[2:]))
+            last_value = self.model.critic(self.state.view(-1 ,*self.state.shape[2:]))
             last_value = last_value.reshape(self.num_workers, self.num_envs)
         
         batch_states = torch.stack(states)
@@ -230,7 +244,7 @@ class PPOMario(LightningModule):
         
         # ic(batch_states.shape, batch_actions.shape, batch_logp.shape, ep_values.shape, ep_rewards.shape, ep_dones.shape, last_value.shape)
         # advantage
-        qval, adv = calc_advantage(self.gamma, self.lam, ep_rewards, ep_dones, ep_values, last_value, self.device, False)
+        qval, adv = calc_advantage(self.gamma, self.lam, ep_rewards, ep_dones, ep_values, last_value, self.device, use_ppg=True)
         batch_qval += qval
         batch_adv += adv
         batch_qval = torch.stack(batch_qval)
@@ -243,6 +257,10 @@ class PPOMario(LightningModule):
         for state, action, old_logp, qval, adv in train_data:
             memory = Memory(state, action, old_logp, qval, adv)
             self.memories.append(memory)
+                
+        for state, reward, value in list(zip(batch_states.view(-1, *batch_states.shape[-3:]), batch_qval.view(-1), ep_values.view(-1))):
+            aux_memory = AuxMemory(state, reward, value)
+            self.aux_memories.append(aux_memory)
         
         self.state = torch.from_numpy(self.env_actor.reset_all())
         self.curr_scores -= self.curr_scores
@@ -273,24 +291,59 @@ class PPOMario(LightningModule):
             loss
         """
         # ic(states.shape, actions.shape, old_logps.shape, qvals.shape, advs.shape)
-        opt = self.optimizers()
-        sch = self.lr_schedulers()
+        actor_opt, critic_opt = self.optimizers()
+        if self.should_aux:
+            for epoch in range(self.aux_batch_epoch):
+                for states, old_action_probs, rewards, old_values in tqdm(self.aux_dl, desc=f"Auxiliary epoch {epoch}", leave=False):
+                    action_probs, policy_values = self.model.actor(states)
+                    action_logprobs = action_probs.log()
+                    aux_loss = clipped_value_loss(policy_values.squeeze(-1), rewards, old_values, self.value_clip)
+                    kl_loss = F.kl_div(action_logprobs, old_action_probs, reduction='batchmean')
+                    policy_loss = aux_loss + kl_loss
+                    self._update_network(policy_loss, actor_opt)
+                    values = self.model.critic(states)
+                    values = values.squeeze(-1)
+                    value_loss = clipped_value_loss(values, rewards, old_values, self.value_clip)
+                    self._update_network(value_loss, critic_opt)
+                    if self.global_step % self.trainer.log_every_n_steps == 0:
+                        self.logger.log_metrics(
+                            {
+                                "aux/aux_step": self.aux_step,
+                                "aux/aux_loss": aux_loss,
+                                "aux/aux_kl_loss": kl_loss,
+                                "aux/policy_loss": policy_loss,
+                                "aux/value_loss": value_loss,
+                            },
+                            step=self.global_step,
+                        )
+            self.aux_dl = None
+            self.should_aux = False
         states, actions, old_logps, qvals, advs = batch
-        action_probs , values = self.model(states)
-        actor_loss = cal_actor_loss(action_probs, actions, old_logps, advs, self.clip_ratio, self.alpha)
-        entropy_loss = torch.mean(Categorical(action_probs).entropy())
+        action_probs, _ = self.model.actor(states)
+        values = self.model.critic(states)
+        dist = Categorical(action_probs)
+        action_log_probs = dist.log_prob(actions)
+        entropy_loss = dist.entropy().mean()
+        
+        ratios = (action_log_probs - old_logps).exp()
+        advs = normalize(advs)
+        surr1 = ratios * advs
+        # surr2 = ratios.clamp(1 - self.clip_ratio * self.alpha, 1 + self.clip_ratio * self.alpha) * advs
+        surr2 = ratios.clamp(1 - self.clip_ratio, 1 + self.clip_ratio) * advs
+        actor_loss = -torch.min(surr1, surr2).mean()
         policy_loss = actor_loss - self.beta * entropy_loss
-        critic_loss = cal_critic_loss(qvals, values)
-        total_loss = policy_loss + critic_loss
-        self.alpha = max(1 - (self.global_step / self.trainer.max_steps), 0)
-        self._update_network(total_loss, opt)
-        sch.step()
+        new_values = self.model.critic(states)
+        value_loss = clipped_value_loss(new_values, qvals, values, self.value_clip)
+        total_loss = policy_loss + value_loss
+        
+        self._update_network(policy_loss, actor_opt)
+        self._update_network(value_loss, critic_opt)
             
         self.log_dict(
             {
                 "episode": self.curr_episode,
                 "policy_loss": policy_loss,
-                "critic_loss": critic_loss,
+                "value_loss": value_loss,
             },
             logger=False,
             prog_bar=True,
@@ -302,7 +355,7 @@ class PPOMario(LightningModule):
                 "loss/entropy_loss": entropy_loss,
                 "loss/actor_loss": actor_loss,
                 "loss/policy_loss": policy_loss,
-                "loss/critic_loss": critic_loss,
+                "loss/value_loss": value_loss,
                 "loss/total_loss": total_loss,
             },
         )
@@ -316,6 +369,11 @@ class PPOMario(LightningModule):
                 "train/avg_ep_score": np.mean(self.ep_scores),
             },
         )
+        
+        if (self.current_epoch + 1) % self.aux_interval_epoch == 0:
+            self.aux_dl = self.aux_dataloader(self.aux_memories)
+            self.aux_memories.clear()
+            self.should_aux = True
     
     def validation_step(self, *args, **kwargs):
         val_scores = []
@@ -339,13 +397,23 @@ class PPOMario(LightningModule):
     def test_step(self, *args, **kwargs):
         return self.eval_1_episode(is_test=True)
     
+    # def configure_gradient_clipping(
+    #     self, optimizer, optimizer_idx, gradient_clip_val, gradient_clip_algorithm
+    # ):
+    #     grad_norm = torch.nn.utils.clip_grad_norm_(
+    #         sum([p["params"] for p in optimizer.param_groups], []), gradient_clip_val
+    #     )
+    #     self.log("grad_norm", grad_norm)
+    
     def configure_optimizers(self) -> List[Optimizer]:
         """Initialize Adam optimizer."""
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, capturable=True)
-        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[lambda x: self.alpha])
+        opt_actor = torch.optim.Adam(self.model.actor.parameters(), lr=self.lr, capturable=True)
+        opt_critic = torch.optim.Adam(self.model.critic.parameters(), lr=self.lr, capturable=True)
         
-        return [optimizer], [lr_scheduler]
-            
+        actor_lr_scheduler = torch.optim.lr_scheduler.LambdaLR(opt_actor, lr_lambda=[lambda x: self.alpha])
+        critic_lr_scheduler = torch.optim.lr_scheduler.LambdaLR(opt_critic, lr_lambda=[lambda x: self.alpha])
+    
+        return [opt_actor, opt_critic], [actor_lr_scheduler, critic_lr_scheduler]
     
     def aux_dataloader(self, aux_memories):        
         states = []
