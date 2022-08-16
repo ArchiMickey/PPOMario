@@ -1,46 +1,39 @@
-from typing import Tuple
 import numpy as np
-from torch import Tensor, nn
+from torch import nn
 import torch.nn.functional as F
 import torch
 
 
-def init_(m):
-    if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
-        gain = nn.init.calculate_gain('relu')
-        nn.init.orthogonal_(m.weight, gain)
-        if m.bias is not None:
-            nn.init.zeros_(m.bias)
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    nn.init.orthogonal_(layer.weight, std)
+    nn.init.constant_(layer.bias, bias_const)
+    return layer
 
 class PPO(nn.Module):
     def __init__(self, state_dim, hidden_dim, num_actions) -> None:
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels=state_dim[0], out_channels=32, kernel_size=3, stride=2, padding=1),
+            layer_init(nn.Conv2d(in_channels=state_dim[0], out_channels=32, kernel_size=8, stride=4)),
             nn.ReLU(),
-            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, stride=2, padding=1),
+            layer_init(nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2)),
             nn.ReLU(),
-            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, stride=2, padding=1),
+            layer_init(nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
         )
-        
         conv_out_size = self._get_conv_out(state_dim)
+        self.fc = nn.Sequential(
+            layer_init(nn.Linear(conv_out_size, hidden_dim)),
+            nn.ReLU(),
+        )
         
         self.action_head = nn.Sequential(
-            nn.Linear(conv_out_size, hidden_dim),
-            nn.ReLU(),
             nn.Linear(hidden_dim, num_actions),
             nn.Softmax(dim=-1),
         )
         self.critic_head = nn.Sequential(
-            nn.Linear(conv_out_size, hidden_dim),
-            nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
-        self.apply(init_)
     
     def _get_conv_out(self, shape):
         conv_out = self.conv(torch.zeros(1, *shape))
@@ -48,7 +41,8 @@ class PPO(nn.Module):
     
     def forward(self, x):
         conv_out = self.conv(x)
-        return self.action_head(conv_out), self.critic_head(conv_out)
+        x = self.fc(conv_out)
+        return self.action_head(x), self.critic_head(x)
     
 class LSTMPPO(nn.Module):
     def __init__(self, state_dim, hidden_dim, num_actions) -> None:

@@ -5,12 +5,6 @@ from src.ppomario import PPOMario
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, ModelSummary
 
 def main(world: int = 1, stage: int = 1, max_steps: int = 10000, ckpt_path: str = None, use_ppg: bool = False,):
-    # if use_ppg:
-    #     run_name = f"PPOMario-PPG-{world}-{stage}"
-    #     ckpt_save_path = f"model/ppg/{world}-{stage}/"
-    # else:
-    #     run_name = f"PPOMario-PPO-{world}-{stage}"
-    #     ckpt_save_path = f"model/ppo/{world}-{stage}/"
     run_name = f"PPOMario-PPO-{world}-{stage}"
     ckpt_save_path = f"model/ppo/{world}-{stage}/"
     
@@ -35,7 +29,7 @@ def main(world: int = 1, stage: int = 1, max_steps: int = 10000, ckpt_path: str 
         save_top_k=3,
         dirpath=ckpt_save_path,
         filename="ppomario-{epoch}-{step}",
-        every_n_epochs=50 * model.batch_epoch,
+        every_n_epochs=20 * model.batch_epoch,
         save_last=True,
         verbose=True,
     )
@@ -58,9 +52,8 @@ def main(world: int = 1, stage: int = 1, max_steps: int = 10000, ckpt_path: str 
     
     if ckpt_path is not None:
         trainer.fit(model, ckpt_path=ckpt_path)
-    
     else:
         trainer.fit(model)
 
 if __name__ == "__main__":
-    main(world=1, stage=1, max_steps=10000000)
+    main(world=1, stage=3, max_steps=10000000)
